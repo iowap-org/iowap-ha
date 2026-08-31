@@ -1,0 +1,60 @@
+name: Build app images
+
+# Builds the HAOS app container (iowap/config.yaml) for both arches and
+# pushes to ghcr.io. Trigger: any push touching the app dir (Supervisor
+# pulls exactly ghcr.io/iowap-org/iowap-ha-{arch}:<config.yaml version>),
+# or manual dispatch. home-assistant/builder builds AND pushes directly.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "iowap/**"
+      - ".github/workflows/build-app-images.yml"
+
+env:
+  IMAGE_PREFIX: ghcr.io/iowap-org/iowap-ha
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    name: Build ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [aarch64, amd64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get version from app config
+        id: version
+        run: |
+          VER=$(awk -F'"' '/^version:/ {print $2; exit}' iowap/config.yaml)
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "Building version $VER"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push (${{ matrix.arch }})
+        uses: home-assistant/builder@2025.03.0
+        with:
+          args: |
+            --${{ matrix.arch }} \
+            --system \
+            --docker-user ${{ github.actor }} \
+            --docker-password ${{ secrets.GITHUB_TOKEN }} \
+            --docker-hub-maintainer ronny.pietschke@icloud.com \
+            --image ${IMAGE_PREFIX} \
+            --version ${{ steps.version.outputs.version }} \
+            iowap
