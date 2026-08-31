@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "minor_version": 1,
+  "key": "iowap",
+  "name": "IOWAP",
+  "services": {
+    "submit_task": {
+      "name": "Submit task to IOWAP cluster",
+      "description": "Submits a single-stage task to the IOWAP relay via the IOWAP app (hassio.app_stdin). Capabilities visible to the HA app: e.g. agent.ai on a cluster node.",
+      "fields": {
+        "capability": {
+          "name": "Capability",
+          "description": "Capability to run, e.g. agent.ai",
+          "required": true,
+          "example": "agent.ai",
+          "selector": {"text": null}
+        },
+        "payload": {
+          "name": "Payload",
+          "description": "JSON payload for the capability stage",
+          "required": true,
+          "selector": {"object": null}
+        },
+        "name": {
+          "name": "Task name",
+          "required": false,
+          "selector": {"text": null}
+        },
+        "priority": {
+          "name": "Priority",
+          "description": "Lower number = sooner (scheduler semantics).",
+          "required": false,
+          "default": 5,
+          "selector": {"number": {"min": 1, "max": 9, "mode": "slider"}}
+        }
+      }
+    }
+  }
+}

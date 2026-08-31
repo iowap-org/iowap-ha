@@ -1,0 +1,37 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "description": "Set up the IOWAP integration. Requires the IOWAP app (same repository) to be installed and configured with your relay URL.",
+        "title": "IOWAP"
+      }
+    },
+    "abort": {
+      "already_configured": "IOWAP is already configured."
+    }
+  },
+  "services": {
+    "submit_task": {
+      "name": "Submit task",
+      "description": "Submits a single-stage task to the IOWAP relay via the IOWAP app. Use a capability the relay knows, e.g. `agent.ai` on one of your nodes.",
+      "fields": {
+        "capability": {
+          "name": "Capability",
+          "description": "Capability to run, e.g. `agent.ai`."
+        },
+        "payload": {
+          "name": "Payload",
+          "description": "JSON payload for the capability stage."
+        },
+        "name": {
+          "name": "Task name",
+          "description": "Optional human-readable task name."
+        },
+        "priority": {
+          "name": "Priority",
+          "description": "Lower number = sooner (scheduler semantics)."
+        }
+      }
+    }
+  }
+}
