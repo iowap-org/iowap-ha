@@ -79,7 +79,36 @@ def rate_ok(cfg: dict, cap: str) -> tuple[bool, str]:
     return True, ""
 
 
+def caps_json() -> None:
+    """Emit the CAPS table as JSON for the run.sh profile bootstrap.
+
+    One source of truth: gen_profile.py mirrors this into node.yaml, so the
+    published capability list can never drift from the security boundary.
+    """
+    caps = [
+        {"name": name,
+         "version": "1.0.0",
+         "type": "tool",
+         "description": f"HA {spec['domain']}.{spec['service']}"
+                        if spec["service"] != "GET_STATE"
+                        else f"HA state read ({spec['domain']})",
+         "input_schema": {
+             "type": "object",
+             "required": ["entity_id"],
+             "properties": {k: {"type": "string"} if k == "entity_id"
+                            else {"type": ["number", "string"]}
+                            for k in spec["fields"]},
+         }}
+        for name, spec in CAPS.items()
+    ]
+    print(json.dumps(caps, indent=2))
+
+
 def main() -> int:
+    if "--caps-json" in sys.argv:
+        caps_json()
+        return 0
+
     try:
         payload = json.loads(sys.stdin.read() or "{}")
     except json.JSONDecodeError as e:
