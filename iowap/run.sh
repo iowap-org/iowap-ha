@@ -1,4 +1,4 @@
-#!/usr/bin/env bashio
+#!/command/with-contenv bashio
 # IOWAP Node app entrypoint.
 # 1. Waits for the HA core API (Supervisor proxy) to come up.
 # 2. Bootstraps relay_config.json + registration (via registration secret from
