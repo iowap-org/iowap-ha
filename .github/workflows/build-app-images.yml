@@ -1,9 +1,10 @@
 name: Build app images
 
 # Builds the HAOS app container (iowap/config.yaml) for both arches and
-# pushes to ghcr.io. Trigger: any push touching the app dir (Supervisor
-# pulls exactly ghcr.io/iowap-org/iowap-ha-{arch}:<config.yaml version>),
-# or manual dispatch. home-assistant/builder builds AND pushes directly.
+# pushes to ghcr.io/iowap-org/iowap-ha-{arch}:<version from config.yaml>.
+# Supervisor installs by exactly that name, so tags must match config.yaml.
+# Plain buildx instead of home-assistant/builder: the legacy action is
+# deprecated and its CLI flags changed under us (--system removed).
 
 on:
   workflow_dispatch:
@@ -15,6 +16,7 @@ on:
 
 env:
   IMAGE_PREFIX: ghcr.io/iowap-org/iowap-ha
+  HA_BASE_TAG: "3.19"
 
 permissions:
   contents: read
@@ -27,7 +29,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [aarch64, amd64]
+        include:
+          - arch: aarch64
+            platform: linux/arm64
+            base: ghcr.io/home-assistant/aarch64-base
+          - arch: amd64
+            platform: linux/amd64
+            base: ghcr.io/home-assistant/amd64-base
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -39,6 +47,14 @@ jobs:
           echo "version=$VER" >> "$GITHUB_OUTPUT"
           echo "Building version $VER"
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
@@ -47,14 +63,18 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build & push (${{ matrix.arch }})
-        uses: home-assistant/builder@2025.03.0
+        uses: docker/build-push-action@v6
         with:
-          args: |
-            --${{ matrix.arch }} \
-            --system \
-            --docker-user ${{ github.actor }} \
-            --docker-password ${{ secrets.GITHUB_TOKEN }} \
-            --docker-hub-maintainer ronny.pietschke@icloud.com \
-            --image ${IMAGE_PREFIX} \
-            --version ${{ steps.version.outputs.version }} \
-            iowap
+          context: iowap
+          file: iowap/Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: true
+          build-args: |
+            BUILD_FROM=${{ matrix.base }}:${{ env.HA_BASE_TAG }}
+          labels: |
+            io.hass.type=app
+            io.hass.arch=${{ matrix.arch }}
+          tags: |
+            ${{ env.IMAGE_PREFIX }}-${{ matrix.arch }}:${{ steps.version.outputs.version }}
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,scope=${{ matrix.arch }},mode=max
