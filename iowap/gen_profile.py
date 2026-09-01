@@ -24,13 +24,30 @@ def main() -> None:
         lines += [
             f"  - name: {c['name']}",
             f"    version: \"{c.get('version', '1.0.0')}\"",
-            f"    description: {c.get('description', c['name'])}",
+            f"    type: {c.get('type', 'tool')}",
+            # block scalar: keeps multi-sentence descriptions one string,
+            # immune to YAML-breaking punctuation in the docs text
+            f"    description: >-",
+            f"      {c.get('description', c['name'])}",
             "    auto_publish: true",
             "    claimable: true",
             "    handler: python3 /usr/local/bin/ha-exec.py",
             "    max_parallel: 1",
             "    timeout: 60",
         ]
+        schema = c.get("input_schema")
+        if isinstance(schema, dict) and schema.get("fields"):
+            lines.append("    input_schema:")
+            lines.append("      fields:")
+            for fname, fs in schema["fields"].items():
+                lines.append(f"        {fname}:")
+                for key, val in fs.items():
+                    if val is None:
+                        continue
+                    if isinstance(val, bool):
+                        lines.append(f"          {key}: {str(val).lower()}")
+                    else:
+                        lines.append(f"          {key}: {json.dumps(val)}")
     sys.stdout.write("\n".join(lines) + "\n")
 
 

@@ -44,6 +44,46 @@ CAPS = {
 
 WRITE_CAPS = {k for k, v in CAPS.items() if v["service"] not in ("GET_STATE",)}
 
+# T-172: Per-field schema entries in the daemon-native CapabilityInputSchema
+# format (see iowap-node nodes/common/capability.py). Every key used in a
+# CAPS 'fields' tuple MUST have an entry here — caps_json() fails the
+# profile bootstrap loudly otherwise (drift alarm: a CAPS field without a
+# schema entry would publish an undocumented input surface).
+# bounds are envelopes for the HA API, not new enforcement — the handler
+# still whitelists keys and HA itself rejects impossible values.
+FIELD_SPECS: dict[str, dict] = {
+    "entity_id":         {"type": "string", "required": True,
+                          "description": "Target HA entity_id '<domain>.<name>'; must match the capability's domain."},
+    "brightness_pct":    {"type": "number", "ge": 0, "le": 100,
+                          "description": "Brightness in percent (0-100)."},
+    "color_temp_kelvin": {"type": "number", "ge": 1500, "le": 6500,
+                          "description": "Color temperature in Kelvin (only for mired-capable lights)."},
+    "transition":        {"type": "number", "ge": 0, "le": 60,
+                          "description": "Seconds to ramp to the new state."},
+    "temperature":       {"type": "number", "ge": 5, "le": 35,
+                          "description": "Target temperature in degrees Celsius (climate)."},
+}
+
+# T-172: human-readable descriptions for discovery + docs. English-only
+# (public repo). Every CAPS key MUST have an entry here — same drift rule
+# as FIELD_SPECS.
+CAP_DOCS: dict[str, str] = {
+    "ha.light.on.native":                "Turn a light entity ON, optionally with brightness, color temperature and transition ramp.",
+    "ha.light.off.native":               "Turn a light entity OFF, optionally with a transition ramp.",
+    "ha.light.toggle.native":            "Toggle a light entity between on and off.",
+    "ha.scene.activate.native":          "Activate a saved Home Assistant scene.",
+    "ha.climate.set_temperature.native": "Set the target temperature of a climate/thermostat entity.",
+    "ha.media.play_pause.native":        "Toggle play/pause on a media player entity.",
+    "ha.switch.toggle.native":           "Toggle a switch entity (plugs, relays).",
+    "ha.fan.toggle.native":              "Toggle a fan entity.",
+    "ha.humidifier.toggle.native":       "Toggle a humidifier/dehumidifier entity.",
+    "ha.vacuum.start.native":            "Start the vacuum's cleaning run.",
+    "ha.vacuum.return_to_base.native":   "Send the vacuum back to its dock.",
+    "ha.state.get.native":               "Read the current state and attributes of one entity (read-only, all domains).",
+    "ha.lock.lock.native":               "Lock a lock entity. Only active when the integration option lock.level=write; lock.open is never available via IOWAP by design.",
+    "ha.lock.unlock.native":             "Unlock a lock entity. Only active when the integration option lock.level=write; lock.open is never available via IOWAP by design.",
+}
+
 
 def load_cfg() -> dict:
     try:
@@ -84,21 +124,41 @@ def caps_json() -> None:
 
     One source of truth: gen_profile.py mirrors this into node.yaml, so the
     published capability list can never drift from the security boundary.
+
+    Schema format is the daemon-native CapabilityInputSchema shape
+    (iowap-node nodes/common/capability.py: {"fields": {<name>: {...}}}),
+    NOT JSON-Schema style — the parser wants per-field 'name' keys.
+
+    Drift alarm: every CAPS field needs a FIELD_SPECS entry and every
+    capability a CAP_DOCS entry. Missing entries abort the bootstrap —
+    an undocumented input surface must never be published.
     """
+    problems: list[str] = []
+    for name, spec in CAPS.items():
+        if name not in CAP_DOCS:
+            problems.append(f"CAP_DOCS missing entry: {name}")
+        for k in spec["fields"]:
+            if k not in FIELD_SPECS:
+                problems.append(f"FIELD_SPECS missing entry: {k} (used by {name})")
+    if problems:
+        print("caps_json drift check FAILED:", file=sys.stderr)
+        for p in problems:
+            print(f"  - {p}", file=sys.stderr)
+        sys.exit(2)
+
     caps = [
-        {"name": name,
-         "version": "1.0.0",
-         "type": "tool",
-         "description": f"HA {spec['domain']}.{spec['service']}"
-                        if spec["service"] != "GET_STATE"
-                        else f"HA state read ({spec['domain']})",
-         "input_schema": {
-             "type": "object",
-             "required": ["entity_id"],
-             "properties": {k: {"type": "string"} if k == "entity_id"
-                            else {"type": ["number", "string"]}
-                            for k in spec["fields"]},
-         }}
+        {
+            "name": name,
+            "version": "1.0.0",
+            "type": "tool",
+            "description": CAP_DOCS[name],
+            "input_schema": {
+                "fields": {
+                    k: {"name": k, **FIELD_SPECS[k]}
+                    for k in spec["fields"]
+                }
+            },
+        }
         for name, spec in CAPS.items()
     ]
     print(json.dumps(caps, indent=2))

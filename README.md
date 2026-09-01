@@ -37,6 +37,34 @@ category *Integration*. Then Settings → Devices & Services → Add Integration
 - Safety automations stay **local**: never couple a safety behavior to the
   relay being up.
 
+### Capability reference
+
+Published automatically from the `CAPS` table in `iowap/ha-exec.py` (single
+source of truth — descriptions and schemas are generated into the node
+profile at boot, never hand-maintained). All write capabilities are also
+subject to per-domain entity scope (`*_entity_scope` options) and a
+per-capability rate limit (`rate_limit_per_min`).
+
+| Capability | Service | Input fields |
+|---|---|---|
+| `ha.light.on.native` | `light.turn_on` | `entity_id`, `brightness_pct` 0–100, `color_temp_kelvin` 1500–6500, `transition` 0–60 s |
+| `ha.light.off.native` | `light.turn_off` | `entity_id`, `transition` |
+| `ha.light.toggle.native` | `light.toggle` | `entity_id` |
+| `ha.scene.activate.native` | `scene.turn_on` | `entity_id` |
+| `ha.climate.set_temperature.native` | `climate.set_temperature` | `entity_id`, `temperature` 5–35 °C |
+| `ha.media.play_pause.native` | `media_player.media_play_pause` | `entity_id` |
+| `ha.switch.toggle.native` | `switch.toggle` | `entity_id` |
+| `ha.fan.toggle.native` | `fan.toggle` | `entity_id` |
+| `ha.humidifier.toggle.native` | `humidifier.toggle` | `entity_id` |
+| `ha.vacuum.start.native` | `vacuum.start` | `entity_id` |
+| `ha.vacuum.return_to_base.native` | `vacuum.return_to_base` | `entity_id` |
+| `ha.state.get.native` | state read (any domain) | `entity_id` |
+| `ha.lock.lock.native` | `lock.lock` — **only with** `lock_level: write` | `entity_id` |
+| `ha.lock.unlock.native` | `lock.unlock` — **only with** `lock_level: write` | `entity_id` |
+
+`lock.open` does not exist in the matrix and is rejected by design — opening
+a latch is never available through IOWAP.
+
 ## Repository layout
 
 ```
