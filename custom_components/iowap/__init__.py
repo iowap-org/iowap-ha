@@ -20,7 +20,6 @@ from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers.device_registry import async_get
 
 from .const import APP_SLUG, DOMAIN
-from .options_flow import OptionsFlow
 
 _LOGGER = logging.getLogger(__name__)
 
