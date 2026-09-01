@@ -43,7 +43,7 @@ if [ ! -f "$CONFIG_DIR/relay_config.json" ]; then
     jq -n --arg u "$RELAY_URL" \
         '{base_url: $u, heartbeat_interval: 8, claim_interval: 5,
           status_interval: 7200, request_timeout: 10, task_timeout: 600,
-          load_cap: 1.0, log_level: "INFO"}' > "$CONFIG_DIR/relay_config.json"
+          log_level: "INFO"}' > "$CONFIG_DIR/relay_config.json"
     log "relay config written (base_url=$RELAY_URL)"
 fi
 
