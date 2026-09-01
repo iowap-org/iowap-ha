@@ -52,9 +52,17 @@ async def async_setup_entry(hass: HomeAssistant, entry) -> bool:
     device_registry = async_get(hass)
     app_slug = None
     for device in device_registry.devices.values():
-        for id_domain, id_value in device.identifiers:
-            if id_domain == "hassio" and str(id_value).endswith(APP_SLUG):
-                app_slug = str(id_value)
+        # Identifiers can be longer than ("domain", "value"): HomeKit bridge
+        # devices carry ("homekit", <id>, "homekit.bridge") since HA 2026.x.
+        # Index-based matching instead of strict tuple unpacking.
+        for ident in device.identifiers:
+            if (
+                isinstance(ident, (list, tuple))
+                and len(ident) >= 2
+                and ident[0] == "hassio"
+                and str(ident[1]).endswith(APP_SLUG)
+            ):
+                app_slug = str(ident[1])
                 break
         if app_slug:
             break
