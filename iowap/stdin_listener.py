@@ -36,7 +36,73 @@ NODE_NAME = "ha-app-node"
 MAX_TRIES = 32                # per-envelope drain budget before final failure
 DRAIN_INTERVAL = 5.0
 
-VALID_KINDS = {"submit_task"}
+VALID_KINDS = {"submit_task", "set_domain_states"}
+# same env override as ha-exec.py (tests); app default /data (persistent)
+DOMAIN_STATES_PATH = Path(
+    os.environ.get("IOWAP_DOMAIN_STATES_PATH", "/data/domain_states.json")
+)
+HA_EXEC = "/usr/local/bin/ha-exec.py"
+GEN_PROFILE = "/usr/local/bin/gen_profile.py"
+# $CONFIG_DIR — run.sh starts node-daemon with WorkingDirectory=$CONFIG_DIR,
+# so the daemon's ACTIVE_PATH (default ~/.relay/node.yaml) lives here.
+CONFIG_DIR = Path(os.environ.get("IOWAP_CONFIG_DIR", "/data/.relay"))
+DOMAIN_MAP_KEYS = ("light", "scene", "climate", "media_player", "switch",
+                   "fan", "humidifier", "vacuum", "lock")
+
+
+def _apply_domain_states(states: dict) -> dict:
+    """T-173: persist domain states and regenerate the live profile.
+
+    1. ha-exec.py --write-domain-states  (atomic persist, whitelist-clean)
+    2. ha-exec.py --caps-json --filter-states | gen_profile.py > node.yaml
+       (same pipeline as run.sh bootstrap, minus caps not allowed by states)
+    3. SIGHUP the node-daemon → invalidates its profile cache → next
+       heartbeat republishes the reduced capability list to the relay.
+
+    Returns the applied (whitelist-cleaned) states for echo-back.
+    """
+    import signal as _signal
+
+    r = subprocess.run(
+        ["python3", HA_EXEC, "--write-domain-states"],
+        input=json.dumps(states), capture_output=True, text=True, timeout=10,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(f"write-domain-states failed: {r.stderr.strip()}")
+    applied = json.loads(r.stdout or "{}")
+
+    r = subprocess.run(
+        ["python3", HA_EXEC, "--caps-json", "--filter-states"],
+        capture_output=True, text=True, timeout=10, check=True,
+    )
+    profile = subprocess.run(
+        ["python3", GEN_PROFILE],
+        input=r.stdout, capture_output=True, text=True, timeout=10, check=True,
+    )
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = CONFIG_DIR / "node.yaml.tmp"
+    tmp.write_text(profile.stdout, encoding="utf-8")
+    tmp.replace(CONFIG_DIR / "node.yaml")  # atomic — daemon cache keys on mtime
+
+    # kick the daemon(s) so the mtime-cached profile is re-read at once.
+    # SIGHUP is idempotent for the daemon (cache invalidation only), so
+    # signalling every match is fine — but never signal ourselves.
+    pids: list[int] = []
+    try:
+        out = subprocess.run(
+            ["pgrep", "-f", "node-daemon|node_cli.*daemon"], capture_output=True,
+            text=True, timeout=5,
+        ).stdout.split()
+        pids = [int(p) for p in out if p.isdigit() and int(p) != os.getpid()]
+    except (ValueError, subprocess.SubprocessError):
+        pass
+    for pid in pids:
+        try:
+            os.kill(pid, _signal.SIGHUP)
+            LOG.info("SIGHUP → node-daemon (pid %s): profile reload", pid)
+        except OSError as exc:
+            LOG.warning("SIGHUP to daemon %s failed (heartbeat still republishes): %s", pid, exc)
+    return applied
 
 
 def _load_config() -> dict[str, Any]:
@@ -49,7 +115,7 @@ def _load_config() -> dict[str, Any]:
 def _load_caps() -> list[dict[str, Any]]:
     """Capability list from ha-exec.py's CAPS table (single source of truth)."""
     out = subprocess.run(
-        ["python3", "/usr/local/bin/ha-exec.py", "--caps-json"],
+        ["python3", "/usr/local/bin/ha-exec.py", "--caps-json", "--filter-states"],
         capture_output=True, text=True, timeout=30, check=True,
     ).stdout
     return json.loads(out)
@@ -59,6 +125,16 @@ def _validate(envelope: dict) -> str | None:
     """Return an error string if the envelope is not acceptable."""
     if envelope.get("kind") not in VALID_KINDS:
         return f"unknown kind {envelope.get('kind')!r}"
+    # set_domain_states is handled locally (no outbox, no relay round-trip)
+    if envelope.get("kind") == "set_domain_states":
+        states = envelope.get("states")
+        if not isinstance(states, dict):
+            return "states must be an object of domain → on|readonly|off"
+        bad = {d: v for d, v in states.items()
+               if d not in DOMAIN_MAP_KEYS or v not in ("on", "readonly", "off")}
+        if bad:
+            return f"invalid domain states: {bad}"
+        return None
     cap = envelope.get("capability")
     if not isinstance(cap, str) or not cap:
         return "capability must be a non-empty string"
@@ -231,7 +307,8 @@ def main() -> None:
         LOG.info("no node registration found — registering with relay")
         _register(_load_caps())
 
-    # stdin reader thread: every valid line goes straight to the outbox
+    # stdin reader thread: submit_task envelopes go to the outbox,
+    # set_domain_states is applied locally (persist + profile regen + HUP)
     def read_stdin() -> None:
         for raw in sys.stdin:
             raw = raw.strip()
@@ -245,6 +322,15 @@ def main() -> None:
             err = _validate(envelope)
             if err:
                 LOG.warning("dropping invalid envelope: %s", err)
+                continue
+            if envelope.get("kind") == "set_domain_states":
+                try:
+                    applied = _apply_domain_states(envelope["states"])
+                    LOG.info("domain states applied: %s", applied)
+                    _notify("IOWAP domain modes updated: " + ", ".join(
+                        f"{d}={v}" for d, v in sorted(applied.items())))
+                except Exception as exc:  # noqa: BLE001
+                    LOG.error("set_domain_states failed: %s", exc)
                 continue
             _append_outbox(envelope)
             LOG.info("envelope queued: %s", envelope.get("capability"))

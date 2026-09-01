@@ -10,6 +10,25 @@
       "already_configured": "IOWAP is already configured."
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "IOWAP domain exposure",
+        "description": "Choose what IOWAP agents may do per domain. {note}",
+        "data": {
+          "light": "Lights (light.*)",
+          "scene": "Scenes (scene.*)",
+          "climate": "Climate (climate.*)",
+          "media_player": "Media players (media_player.*)",
+          "switch": "Switches (switch.*)",
+          "fan": "Fans (fan.*)",
+          "humidifier": "Humidifiers (humidifier.*)",
+          "vacuum": "Vacuums (vacuum.*)",
+          "lock": "Locks (lock.*)"
+        }
+      }
+    }
+  },
   "services": {
     "submit_task": {
       "name": "Submit task",

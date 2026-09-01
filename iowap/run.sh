@@ -65,7 +65,10 @@ install -m 0755 /usr/local/bin/ha-exec.py /data/handlers/ha-exec.py
 #    boundary). Regenerated every boot; daemon publishes it on registration
 #    and via publish-diff at runtime.
 mkdir -p "$CONFIG_DIR"
-python3 /usr/local/bin/ha-exec.py --caps-json \
+# --filter-states: publish-set honors persisted domain states (T-173) —
+# write caps only for domains mode=on, state-read for mode!=off. Defaults
+# (no state file) = every domain readonly → only ha.state.get published.
+python3 /usr/local/bin/ha-exec.py --caps-json --filter-states \
     | python3 /usr/local/bin/gen_profile.py > "$CONFIG_DIR/node.yaml"
 log "node profile generated ($(grep -c 'name:' "$CONFIG_DIR/node.yaml") capabilities)"
 

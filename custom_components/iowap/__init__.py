@@ -20,6 +20,7 @@ from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers.device_registry import async_get
 
 from .const import APP_SLUG, DOMAIN
+from .options_flow import OptionsFlow
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -37,13 +38,33 @@ SUBMIT_SCHEMA = vol.Schema(
 CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)
 
 
+def async_get_options_flow(config_entry):
+    """Get the options flow for this handler (per-domain exposure modes)."""
+    return OptionsFlow()
+
+
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Minimal setup without a config entry (v1 stub)."""
     return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry) -> bool:
-    """Set up from a config entry: register the submit_task service."""
+    """Set up from a config entry: submit_task service + options flow."""
+    entry.async_on_unload(entry.add_update_listener(_options_updated))
+    return await _register_services(hass, entry)
+
+
+async def _options_updated(hass: HomeAssistant, entry) -> None:
+    """Options flow saved — push the new domain map to the app."""
+    from .helpers import push_to_app
+
+    states = entry.options.get("domain_states", {})
+    await push_to_app(hass, {"kind": "set_domain_states", "states": states})
+    _LOGGER.info("pushed domain states to app: %s", states)
+
+
+async def _register_services(hass: HomeAssistant, entry) -> bool:
+    """Register the submit_task service (slug resolution as in v1)."""
 
     # Resolve the runtime app slug from the device registry. HAOS prefixes
     # local repo slugs (e.g. `16b71320_iowap`), so the bare repo name is not

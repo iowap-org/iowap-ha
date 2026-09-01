@@ -84,6 +84,43 @@ CAP_DOCS: dict[str, str] = {
     "ha.lock.unlock.native":             "Unlock a lock entity. Only active when the integration option lock.level=write; lock.open is never available via IOWAP by design.",
 }
 
+# T-173: per-domain exposure mode, set by the integration's options flow and
+# shipped to the app via hassio.app_stdin {kind: "set_domain_states"}.
+#   on       → full capability set for the domain
+#   readonly → state reads only (write caps for the domain are unpublished)
+#   off      → domain fully invisible (reads AND writes rejected handler-side)
+# Default for every domain is "readonly" (T-169 status quo). Persisted in
+# /data/domain_states.json, survives app restarts.
+DOMAIN_STATES = ("on", "readonly", "off")
+# env override for tests; app default is /data (persistent volume)
+DOMAIN_STATES_PATH = Path(
+    os.environ.get("IOWAP_DOMAIN_STATES_PATH", "/data/domain_states.json")
+)
+# every domain the CAPS matrix touches — incl. "*" from GET_STATE
+KNOWN_DOMAINS = tuple(sorted({spec["domain"] for spec in CAPS.values()} - {"*"}))
+
+
+def load_domain_states() -> dict[str, str]:
+    """Read domain → mode mapping; sane defaults for all known domains."""
+    states = {d: "readonly" for d in KNOWN_DOMAINS}
+    try:
+        raw = json.loads(DOMAIN_STATES_PATH.read_text())
+        if isinstance(raw, dict):
+            for d, v in raw.items():
+                if d in KNOWN_DOMAINS and v in DOMAIN_STATES:
+                    states[d] = v
+    except (OSError, ValueError):
+        pass  # missing/corrupt file = defaults
+    return states
+
+
+def write_domain_states(states: dict[str, str]) -> None:
+    """Persist domain states atomically (called from the stdin listener)."""
+    clean = {d: v for d, v in states.items() if d in KNOWN_DOMAINS and v in DOMAIN_STATES}
+    tmp = DOMAIN_STATES_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(clean))
+    tmp.replace(DOMAIN_STATES_PATH)
+
 
 def load_cfg() -> dict:
     try:
@@ -132,6 +169,11 @@ def caps_json() -> None:
     Drift alarm: every CAPS field needs a FIELD_SPECS entry and every
     capability a CAP_DOCS entry. Missing entries abort the bootstrap —
     an undocumented input surface must never be published.
+
+    With --filter-states (T-173): only publish capabilities allowed by the
+    current domain states — write caps need domain mode "on", state-read
+    caps need mode != "off". Used by the stdin listener on domain-state
+    changes to regenerate the live profile.
     """
     problems: list[str] = []
     for name, spec in CAPS.items():
@@ -145,6 +187,16 @@ def caps_json() -> None:
         for p in problems:
             print(f"  - {p}", file=sys.stderr)
         sys.exit(2)
+
+    states = load_domain_states() if "--filter-states" in sys.argv else None
+
+    def published(name: str, spec: dict) -> bool:
+        if states is None:
+            return True
+        mode = states.get(spec["domain"], "readonly")
+        if spec["service"] == "GET_STATE":
+            return mode != "off"
+        return mode == "on"
 
     caps = [
         {
@@ -160,6 +212,7 @@ def caps_json() -> None:
             },
         }
         for name, spec in CAPS.items()
+        if published(name, spec)
     ]
     print(json.dumps(caps, indent=2))
 
@@ -167,6 +220,20 @@ def caps_json() -> None:
 def main() -> int:
     if "--caps-json" in sys.argv:
         caps_json()
+        return 0
+
+    # T-173: persist a domain-states map (JSON on stdin) from the stdin
+    # listener. Prints the applied whitelist-cleaned mapping as JSON.
+    if "--write-domain-states" in sys.argv:
+        try:
+            states = json.loads(sys.stdin.read() or "{}")
+            if not isinstance(states, dict):
+                raise ValueError("must be a JSON object")
+            write_domain_states(states)
+        except (ValueError, OSError) as e:
+            print(json.dumps({"error": f"invalid domain states: {e}"}))
+            return 2
+        print(json.dumps(load_domain_states()))
         return 0
 
     try:
@@ -197,6 +264,20 @@ def main() -> int:
     cfg_key = ent_domain + "_entity_scope"
     if not scope_allowed(cfg, cfg_key, entity_id):
         print(json.dumps({"error": f"entity {entity_id} outside configured scope"}))
+        return 3
+
+    # T-173: per-domain exposure gate. "off" → domain invisible (denied
+    # handler-side even if a stale profile still published the cap).
+    # "readonly" → write-capabilities denied; only state reads pass.
+    # Defense-in-depth: the publish-set (--filter-states) already keeps
+    # these caps off the relay, this gate stops stale/direct invocations.
+    dstate = load_domain_states().get(ent_domain, "readonly")
+    if spec["service"] == "GET_STATE":
+        if dstate == "off":
+            print(json.dumps({"error": f"domain {ent_domain} is disabled (mode=off) — read denied"}))
+            return 3
+    elif dstate != "on":
+        print(json.dumps({"error": f"domain {ent_domain} is {dstate} — write denied (readonly/off)"}))
         return 3
 
     # lock write-gate: read-only unless integration config explicitly upgraded
