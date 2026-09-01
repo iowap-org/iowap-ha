@@ -41,17 +41,18 @@ if [ ! -f "$CONFIG_DIR/relay_config.json" ]; then
         exit 1
     fi
     jq -n --arg u "$RELAY_URL" \
-        '{base_url: $arg, heartbeat_interval: 8, claim_interval: 5,
+        '{base_url: $u, heartbeat_interval: 8, claim_interval: 5,
           status_interval: 7200, request_timeout: 10, task_timeout: 600,
           load_cap: 1.0, log_level: "INFO"}' > "$CONFIG_DIR/relay_config.json"
     log "relay config written (base_url=$RELAY_URL)"
 fi
 
-# 4. pip-pinned node framework (T-170 P2: version pinned, not floating)
+# 4. node framework ships in the image (/opt/venv, pinned at build time).
+#    Verify it's importable; a missing/old package is fatal (was: runtime pip,
+#    which PEP 668 blocked on Alpine 3.20+).
 if ! python3 -c "import nodes" 2>/dev/null; then
-    log "installing iowap-node==2.0.0 (pinned)"
-    pip3 install --no-cache-dir "iowap-node==2.0.0" \
-        || { log "pip install of iowap-node failed"; exit 1; }
+    log "ERROR: iowap-node not importable (image build broken?)"
+    exit 1
 fi
 
 # 5. handlers: ha-exec.py is the security boundary (capability table inside).
@@ -68,19 +69,33 @@ python3 /usr/local/bin/ha-exec.py --caps-json \
     | python3 /usr/local/bin/gen_profile.py > "$CONFIG_DIR/node.yaml"
 log "node profile generated ($(grep -c 'name:' "$CONFIG_DIR/node.yaml") capabilities)"
 
-# 7. node-daemon (bg) + stdin-listener (fg, PID 1 via exec). hassio.app_stdin
-#    targets THIS container's stdin, so the listener must be the process
-#    holding it. The listener registers the node on first boot (pending until
-#    admin approval); the daemon heartbeats regardless. Supervisor restarts
-#    the whole app if the listener exits; on stop, SIGTERM ends the listener
-#    and container teardown reaps the daemon.
-log "starting node-daemon (WorkingDir=$CONFIG_DIR)"
+# 7. node-daemon (supervised bg) + stdin-listener (fg, PID 1 via exec).
+#    hassio.app_stdin targets THIS container's stdin, so the listener must be
+#    the process holding it. The listener registers the node on first boot
+#    (pending until admin approval); the daemon only runs once that meta file
+#    exists — it crashes on a missing meta (SSE daemon, not the old polling
+#    daemon), so we supervise: wait for meta, restart on crash. Supervisor
+#    restarts the whole app if the listener exits; on stop, SIGTERM ends the
+#    listener and container teardown reaps the supervisor loop.
+log "starting node-daemon supervisor (WorkingDir=$CONFIG_DIR)"
 cd "$CONFIG_DIR"
-node-daemon --foreground &
-DAEMON_PID=$!
+
+supervise_daemon() {
+    while true; do
+        if [ -f "$CONFIG_DIR/iowap-agent.json" ]; then
+            if ! node-daemon --foreground; then
+                log "node-daemon exited (rc=$?) — restarting in 5s"
+            fi
+        fi
+        sleep 5
+    done
+}
+supervise_daemon &
+SUPERVISOR_PID=$!
 
 shutdown() {
-    kill "$DAEMON_PID" 2>/dev/null || true
+    kill "$SUPERVISOR_PID" 2>/dev/null || true
+    pkill -f '^node-daemon' 2>/dev/null || true
 }
 trap shutdown TERM INT
 
