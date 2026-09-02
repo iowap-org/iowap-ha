@@ -15,12 +15,18 @@ the `iowap/` app folder, HACS reads `custom_components/iowap/`.]
 
 ## Installation
 
-**App (cluster → HA):** Settings → Apps → App Store → ⋮ → Repositories → add
-this repository URL. Install **IOWAP Node**, set your `relay_url` in the app
+**App (cluster → HA):**
+[![Open your Home Assistant instance and add the IOWAP repository to your app store.](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fiowap-org%2Fiowap-ha)
+
+Or manually: Settings → Apps → App Store → ⋮ → Repositories → add
+`https://github.com/iowap-org/iowap-ha`. Install **IOWAP Node**, set your `relay_url` in the app
 options, start. The node registers on the relay and appears in your relay
 dashboard for approval (status: `pending`).
 
-**Integration (HA → cluster):** HACS → ⋮ → Custom repositories → this URL,
+**Integration (HA → cluster):**
+[![Open your Home Assistant instance and add the IOWAP repository to HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fiowap-org%2Fiowap-ha&category=integration)
+
+Or manually: HACS → ⋮ → Custom repositories → `https://github.com/iowap-org/iowap-ha`,
 category *Integration*. Then Settings → Devices & Services → Add Integration
 → **IOWAP**.
 
