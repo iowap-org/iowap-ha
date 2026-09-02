@@ -48,9 +48,16 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 
 
 async def async_setup_entry(hass: HomeAssistant, entry) -> bool:
-    """Set up from a config entry: submit_task service + options flow."""
+    """Set up from a config entry: submit_task service + mirror platforms."""
     entry.async_on_unload(entry.add_update_listener(_options_updated))
+    await hass.config_entries.async_forward_entry_setups(entry, ["sensor", "binary_sensor"])
     return await _register_services(hass, entry)
+
+
+async def async_unload_entry(hass: HomeAssistant, entry) -> bool:
+    unload = await hass.config_entries.async_unload_platforms(entry, ["sensor", "binary_sensor"])
+    hass.services.async_remove(DOMAIN, "submit_task")
+    return unload
 
 
 async def _options_updated(hass: HomeAssistant, entry) -> None:
@@ -114,9 +121,4 @@ async def _register_services(hass: HomeAssistant, entry) -> bool:
     hass.services.async_register(
         DOMAIN, "submit_task", _handle_submit, schema=SUBMIT_SCHEMA
     )
-    return True
-
-
-async def async_unload_entry(hass: HomeAssistant, entry) -> bool:
-    hass.services.async_remove(DOMAIN, "submit_task")
     return True

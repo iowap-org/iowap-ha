@@ -198,6 +198,13 @@ def _compute_state() -> dict:
 
     Returns {} when there is nothing to push yet (daemon not started).
     """
+    push_interval = DEFAULT_STATUS_PUSH_INTERVAL
+    try:
+        opts = json.loads((DATA / "options.json").read_text())
+        push_interval = int(opts.get("status_push_interval") or DEFAULT_STATUS_PUSH_INTERVAL)
+    except Exception:
+        pass
+
     status = _read_json(STATUS_PATH)
     if status is None:
         return {}
@@ -238,6 +245,7 @@ def _compute_state() -> dict:
         "in_flight": len(status.get("in_flight") or {}),
         "per_cap": per_cap,
         "server": server,
+        "push_interval": push_interval,
     }
 
 
@@ -247,11 +255,12 @@ def _push_telemetry(payload: dict, token: str) -> bool:
 
     ok = True
     r = httpx.post(
-        "http://supervisor/core/api/states/binary_sensor.iowap_node_ready",
+        "http://supervisor/core/api/states/binary_sensor.iowap_raw_node_ready",
         headers={"Authorization": f"Bearer {token}"},
         json={"state": "on" if payload["ready"] else "off",
               "attributes": {"friendly_name": "IOWAP Node Ready",
                              "icon": "mdi:cloud-check",
+                             "push_interval": payload.get("push_interval"),
                              "reason": payload["reason"],
                              "node_id": payload["node_id"],
                              "last_heartbeat": payload["last_heartbeat"],
@@ -266,7 +275,7 @@ def _push_telemetry(payload: dict, token: str) -> bool:
         LOG.warning("ready sensor push failed: HTTP %s", r.status_code)
 
     r = httpx.post(
-        "http://supervisor/core/api/states/sensor.iowap_node_metrics",
+        "http://supervisor/core/api/states/sensor.iowap_raw_node_metrics",
         headers={"Authorization": f"Bearer {token}"},
         json={"state": payload["capabilities"],
               "attributes": {"friendly_name": "IOWAP Node Metrics",
@@ -287,7 +296,7 @@ def _push_telemetry(payload: dict, token: str) -> bool:
     srv = payload.get("server") or {}
     srv_ok = bool(srv.get("ok"))
     r = httpx.post(
-        "http://supervisor/core/api/states/binary_sensor.iowap_server_ready",
+        "http://supervisor/core/api/states/binary_sensor.iowap_raw_server_ready",
         headers={"Authorization": f"Bearer {token}"},
         json={"state": "on" if srv_ok else "off",
               "attributes": {"friendly_name": "IOWAP Server Ready",
@@ -304,7 +313,7 @@ def _push_telemetry(payload: dict, token: str) -> bool:
         LOG.warning("server ready push failed: HTTP %s", r.status_code)
 
     r = httpx.post(
-        "http://supervisor/core/api/states/sensor.iowap_server_metrics",
+        "http://supervisor/core/api/states/sensor.iowap_raw_server_metrics",
         headers={"Authorization": f"Bearer {token}"},
         json={"state": int(srv.get("nodes_online") or 0),
               "attributes": {"friendly_name": "IOWAP Server Metrics",
@@ -318,7 +327,15 @@ def _push_telemetry(payload: dict, token: str) -> bool:
                              "stages_retry_ratio": srv.get("stages_retry_ratio"),
                              "tasks_created_5m": srv.get("tasks_created_5m"),
                              "tasks_completed_5m": srv.get("tasks_completed_5m"),
-                             "node_load": srv.get("node_load") or {}}},
+                             "node_load": srv.get("node_load") or {},
+                             "capabilities": [
+                                 {"name": c.get("name"),
+                                  "available": bool(c.get("available")),
+                                  "nodes": [n.get("node_name")
+                                            for n in (c.get("nodes") or [])]}
+                                 for c in (payload.get("caps") or [])
+                                 if isinstance(c, dict) and c.get("name")
+                             ]}},
         timeout=5,
     )
     ok &= r.status_code in (200, 201)
@@ -347,19 +364,31 @@ def _telemetry_loop() -> None:
             time.sleep(1)
 
 
-def _rewrite_outbox(remaining: list[dict]) -> None:
-    """Atomically rewrite outbox.jsonl with the not-yet-submitted envelopes."""
+def _rewrite_outbox(remaining: list) -> None:
+    """Atomically rewrite outbox.jsonl with the not-yet-submitted envelopes.
+
+    Items may be dicts (encoded here) or pre-encoded JSON strings (written
+    verbatim — used by _rewrite_tracked to preserve corrupt lines).
+    """
     tmp = OUTBOX.with_suffix(".jsonl.tmp")
     with tmp.open("w", encoding="utf-8") as fh:
         for env in remaining:
-            fh.write(json.dumps(env, separators=(",", ":")) + "\n")
+            line = env if isinstance(env, str) else json.dumps(env, separators=(",", ":"))
+            fh.write(line + "\n")
         fh.flush()
         os.fsync(fh.fileno())
     tmp.replace(OUTBOX)
 
 
 def drain_once(client: Any) -> tuple[int, int]:
-    """Submit every pending envelope; returns (submitted, failed)."""
+    """Submit every pending envelope; returns (submitted, failed).
+
+    T-179: on success the returned task_id is stored in the envelope so the
+    telemetry loop can poll its status until a terminal state is reached.
+    The tracked envelope then stays in the outbox (marked with _task_id and
+    _done) so HA-side tracking survives container restarts — drain skips
+    envelopes that already carry a task_id.
+    """
     if not OUTBOX.exists():
         return 0, 0
     submitted = failed = 0
@@ -373,29 +402,182 @@ def drain_once(client: Any) -> tuple[int, int]:
             LOG.warning("dropping corrupt outbox line")
             failed += 1
             continue
+        if env.get("_task_id"):  # already submitted, only tracked now
+            remaining.append(env)
+            continue
         tries = int(env.get("_tries", 0))
         try:
-            client.submit_simple_task(
+            resp = client.submit_simple_task(
                 env["capability"],
                 env["payload"],
                 name=env.get("name") or "",
                 priority=env.get("priority", 5),
             )
+            task_id = resp.get("task_id") if isinstance(resp, dict) else None
+            if task_id:
+                env["_task_id"] = str(task_id)
+                env["_done"] = False
+                remaining.append(env)
+                LOG.info("task accepted: %s → %s", env["capability"], task_id)
             submitted += 1
         except Exception as exc:  # noqa: BLE001
             tries += 1
             env["_tries"] = tries
-            remaining.append(env)
             if tries >= MAX_TRIES:
                 failed += 1
+                env["_done"] = True
+                env["_error"] = str(exc)
                 _notify(
                     f"Task submit final failed after {tries} attempts: "
                     f"{env.get('capability')} ({exc})"
                 )
             else:
                 LOG.debug("submit retry %d/%d: %s", tries, MAX_TRIES, exc)
+            remaining.append(env)
     _rewrite_outbox(remaining)
     return submitted, failed
+
+
+TRACKED_LIMIT = 20  # max envelopes polled per telemetry pass
+
+
+def _poll_tracked_tasks(client: Any) -> dict | None:
+    """T-179: poll tracked tasks in the outbox for a status snapshot.
+
+    Returns the payload for sensor.iowap_raw_tasks (None when nothing is
+    tracked and nothing has ever been submitted). Terminal envelopes get
+    _done=True written back once (stop polling them).
+    """
+    if not OUTBOX.exists():
+        return None
+    tracked: list[dict] = []
+    for line in OUTBOX.read_text(encoding="utf-8").splitlines():
+        try:
+            env = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if env.get("_task_id") and not env.get("_done"):
+            tracked.append(env)
+    if not tracked:
+        return None
+
+    statuses: dict[str, str] = {}
+    for env in tracked[:TRACKED_LIMIT]:
+        try:
+            data = client.get_task(env["_task_id"])
+        except Exception as exc:  # noqa: BLE001
+            LOG.debug("task poll %s failed: %s", env["_task_id"], exc)
+            continue
+        if not isinstance(data, dict) or "error" in data:
+            continue
+        status = str((data.get("task") or {}).get("status") or "unknown")
+        statuses[env["_task_id"]] = status
+        if status in ("completed", "failed", "timed_out"):
+            env["_done"] = True
+            if status != "completed":
+                _notify(f"IOWAP task {env['_task_id']} ended: {status}")
+            LOG.info("task %s terminal: %s", env["_task_id"], status)
+    if not statuses:
+        return None
+    in_flight = sum(1 for s in statuses.values() if s not in ("completed", "failed", "timed_out"))
+    last_id = tracked[0]["_task_id"]
+    return {
+        "state": in_flight,
+        "last_task_id": last_id,
+        "last_status": statuses.get(last_id, "unknown"),
+        "in_flight": in_flight,
+        "statuses": statuses,
+        "tracked": tracked,
+    }
+
+
+def _rewrite_tracked(tracked: list[dict]) -> None:
+    """Merge _done flags back into the outbox (by task_id), keeping order."""
+    done_map = {e["_task_id"]: e for e in tracked if e.get("_done")}
+    if not done_map or not OUTBOX.exists():
+        return
+    lines: list[dict | str] = []
+    for line in OUTBOX.read_text(encoding="utf-8").splitlines():
+        try:
+            env = json.loads(line)
+        except json.JSONDecodeError:
+            lines.append(line)  # corrupt: preserve verbatim
+            continue
+        match = done_map.get(str(env.get("_task_id")))
+        if match is not None:
+            env = match
+        lines.append(env)
+    _rewrite_outbox(lines)
+
+
+def _telemetry_loop() -> None:
+    interval = DEFAULT_STATUS_PUSH_INTERVAL
+    try:
+        opts = json.loads((DATA / "options.json").read_text())
+        interval = int(opts.get("status_push_interval") or DEFAULT_STATUS_PUSH_INTERVAL)
+    except Exception:
+        pass
+    LOG.info("telemetry push every %ss", interval)
+    client = None
+    try:
+        client = _make_client()
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("telemetry: no relay client yet (%s) — tasks/caps skipped", exc)
+    while True:
+        try:
+            token = os.environ.get("SUPERVISOR_TOKEN", "")
+            payload = _compute_state()
+            if payload and token:
+                # T-179b: cluster capabilities (same discovery endpoint as
+                # node-cli) ride along as a server-metrics attribute.
+                if client is not None:
+                    payload["caps"] = _fetch_capabilities(client)
+                _push_telemetry(payload, token)
+            if client is not None and token:
+                # T-179a: task feedback (sensor.iowap_raw_tasks)
+                tracked = _poll_tracked_tasks(client)
+                if tracked:
+                    _push_tracked(tracked, token)
+                    _rewrite_tracked(tracked["tracked"])
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("telemetry push error: %s", exc)
+        for _ in range(max(1, interval)):
+            time.sleep(1)
+
+
+def _push_tracked(payload: dict, token: str) -> None:
+    """Push sensor.iowap_raw_tasks (T-179a)."""
+    import httpx
+
+    r = httpx.post(
+        "http://supervisor/core/api/states/sensor.iowap_raw_tasks",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"state": payload["state"],
+              "attributes": {"friendly_name": "IOWAP Tasks",
+                             "icon": "mdi:format-list-checks",
+                             "unit_of_measurement": "in flight",
+                             "last_task_id": payload["last_task_id"],
+                             "last_status": payload["last_status"],
+                             "in_flight": payload["in_flight"],
+                             "statuses": payload["statuses"]}},
+        timeout=5,
+    )
+    if r.status_code not in (200, 201):
+        LOG.warning("tasks sensor push failed: HTTP %s", r.status_code)
+
+
+def _fetch_capabilities(client: Any) -> list[dict] | None:
+    """T-179b: cluster-wide capabilities via the same discovery endpoint
+    node-cli uses (capabilities server). None on any error — fail-safe."""
+    try:
+        r = client._get_with_retry("/relay/v2/discovery/capabilities")
+        r.raise_for_status()
+        data = r.json()
+    except Exception as exc:  # noqa: BLE001
+        LOG.debug("capability discovery failed: %s", exc)
+        return None
+    caps = data.get("capabilities", data) if isinstance(data, dict) else data
+    return caps if isinstance(caps, list) else None
 
 
 def drain_loop(client: Any) -> None:
