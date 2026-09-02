@@ -69,12 +69,22 @@ def _iter_fields(input_schema: Any) -> list[dict]:
 def _field_selector(field: dict) -> dict:
     """Map one schema field to an HA selector (best effort)."""
     ftype = str(field.get("type") or "string").lower()
+    is_number = ftype in ("int", "integer", "number", "float")
+    # number+enum wins over the bare enum branch: a numeric enum must stay a
+    # number selector (enum values would arrive as strings and fail coercion).
+    if is_number and field.get("enum") is not None and isinstance(field["enum"], list):
+        num: dict[str, Any] = {}
+        if field.get("ge") is not None:
+            num["min"] = field["ge"]
+        if field.get("le") is not None:
+            num["max"] = field["le"]
+        return {"number": num or None}
     if field.get("enum") is not None and isinstance(field["enum"], list):
         return {"select": {"options": [str(v) for v in field["enum"]]}}
     if ftype in ("bool", "boolean"):
         return {"boolean": None}
-    if ftype in ("int", "integer", "number", "float"):
-        num: dict[str, Any] = {}
+    if is_number:
+        num = {}
         if field.get("ge") is not None:
             num["min"] = field["ge"]
         if field.get("le") is not None:

@@ -368,26 +368,6 @@ def _push_telemetry(payload: dict, token: str) -> bool:
     return ok
 
 
-def _telemetry_loop() -> None:
-    interval = DEFAULT_STATUS_PUSH_INTERVAL
-    try:
-        opts = json.loads((DATA / "options.json").read_text())
-        interval = int(opts.get("status_push_interval") or DEFAULT_STATUS_PUSH_INTERVAL)
-    except Exception:
-        pass
-    LOG.info("telemetry push every %ss", interval)
-    while True:
-        try:
-            token = os.environ.get("SUPERVISOR_TOKEN", "")
-            payload = _compute_state()
-            if payload and token:
-                _push_telemetry(payload, token)
-        except Exception as exc:  # noqa: BLE001
-            LOG.warning("telemetry push error: %s", exc)
-        for _ in range(max(1, interval)):
-            time.sleep(1)
-
-
 def _rewrite_outbox(remaining: list) -> None:
     """Atomically rewrite outbox.jsonl with the not-yet-submitted envelopes.
 

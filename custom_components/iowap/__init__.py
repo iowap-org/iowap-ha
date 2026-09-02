@@ -12,7 +12,6 @@ to the relay directly. This integration provides:
 
 from __future__ import annotations
 
-import json
 import logging
 
 import homeassistant.helpers.config_validation as cv
@@ -23,11 +22,10 @@ from homeassistant.core import (
     ServiceResponse,
     SupportsResponse,
 )
-from homeassistant.helpers.device_registry import async_get
 from homeassistant.helpers.event import async_track_state_change_event
 
-from . import blueprints
-from .const import APP_SLUG, DOMAIN
+from . import blueprints, helpers
+from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -43,11 +41,6 @@ SUBMIT_SCHEMA = vol.Schema(
 )
 
 CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)
-
-
-def async_get_options_flow(config_entry):
-    """Get the options flow for this handler (per-domain exposure modes)."""
-    return OptionsFlow()
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
@@ -115,39 +108,17 @@ async def _refresh_blueprints(hass: HomeAssistant) -> None:
 
 async def _options_updated(hass: HomeAssistant, entry) -> None:
     """Options flow saved — push the new domain map to the app."""
-    from .helpers import push_to_app
-
     states = entry.options.get("domain_states", {})
-    await push_to_app(hass, {"kind": "set_domain_states", "states": states})
+    await helpers.push_to_app(hass, {"kind": "set_domain_states", "states": states})
     _LOGGER.info("pushed domain states to app: %s", states)
 
 
 async def _register_services(hass: HomeAssistant, entry) -> bool:
     """Register the submit_task service (slug resolution as in v1)."""
 
-    # Resolve the runtime app slug from the device registry. HAOS prefixes
-    # local repo slugs (e.g. `16b71320_iowap`), so the bare repo name is not
-    # a valid `app` argument for hassio services. The app device carries the
-    # identifier ("hassio", "<slug>") — match it against APP_SLUG as suffix.
-    device_registry = async_get(hass)
-    app_slug = None
-    for device in device_registry.devices.values():
-        # Identifiers can be longer than ("domain", "value"): HomeKit bridge
-        # devices carry ("homekit", <id>, "homekit.bridge") since HA 2026.x.
-        # Index-based matching instead of strict tuple unpacking.
-        for ident in device.identifiers:
-            if (
-                isinstance(ident, (list, tuple))
-                and len(ident) >= 2
-                and ident[0] == "hassio"
-                and str(ident[1]).endswith(APP_SLUG)
-            ):
-                app_slug = str(ident[1])
-                break
-        if app_slug:
-            break
-    if not app_slug:  # safety net: try the bare name (covers supervisor quirk)
-        app_slug = APP_SLUG
+    # Resolve the runtime app slug via the shared helper (same logic the
+    # options-update path uses — single source of truth).
+    app_slug = helpers.resolve_app_slug(hass)
     _LOGGER.debug("resolved IOWAP app slug: %s", app_slug)
 
     async def _handle_submit(call: ServiceCall) -> None:

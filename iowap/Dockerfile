@@ -9,12 +9,17 @@ RUN apk add --no-cache curl jq python3
 #    Alpine 3.20+ — a venv is the supported path.
 # 2) iowap-node has no PyPI release; the wheel is vendored in iowap-ha
 #    (iowap/vendor/) and must be refreshed when the framework bumps.
+# 3) httpx is installed explicitly even though iowap-node already declares
+#    it: stdin_listener.py (_notify, telemetry push) imports httpx directly,
+#    and an implicit transitive dep would break at runtime (not build time)
+#    if a future iowap-node wheel dropped it.
 # /opt/venv/bin is prepended to PATH so `node-daemon`, `import nodes` and the
 # framework deps resolve in every run.sh call.
 COPY vendor/iowap_node-2.1.0-py3-none-any.whl /tmp/
 RUN python3 -m venv /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir --upgrade pip \
     && /opt/venv/bin/pip install --no-cache-dir /tmp/iowap_node-2.1.0-py3-none-any.whl \
+    && /opt/venv/bin/pip install --no-cache-dir "httpx>=0.27" \
     && rm /tmp/iowap_node-2.1.0-py3-none-any.whl
 ENV PATH="/opt/venv/bin:$PATH"
 
