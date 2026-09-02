@@ -70,6 +70,8 @@ async def async_setup_entry(hass: HomeAssistant, entry) -> bool:
     registered = await _register_services(hass, entry)
     # T-180/3: regenerate blueprints whenever the server-metrics entity
     # (mirror or raw) updates — the capabilities attribute rides on it.
+    global _HASS_REF
+    _HASS_REF = hass
     entry.async_on_unload(
         async_track_state_change_event(
             hass, list(blueprints.ENTITY_CANDIDATES), _on_server_metrics
@@ -89,7 +91,17 @@ async def async_unload_entry(hass: HomeAssistant, entry) -> bool:
 
 async def _on_server_metrics(event) -> None:
     """Server-metrics entity changed — refresh capability blueprints."""
-    await _refresh_blueprints(event.hass)
+    # Event objects carry only data (entity_id/new_state/...), never .hass —
+    # resolve via the module ref set in async_setup_entry (T-180 fix:
+    # 'Event' object has no attribute 'hass' crashed every refresh pass).
+    if _HASS_REF is None:
+        return
+    await _refresh_blueprints(_HASS_REF)
+
+
+# Set in async_setup_entry before the state listener is registered; the
+# Event object passed to state-change handlers has no .hass attribute.
+_HASS_REF: HomeAssistant | None = None
 
 
 async def _refresh_blueprints(hass: HomeAssistant) -> None:

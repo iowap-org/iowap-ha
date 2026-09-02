@@ -55,6 +55,7 @@
     "get_capabilities": {
       "name": "Get cluster capabilities",
       "description": "Returns the capabilities the IOWAP cluster currently offers (incl. input_schema), read from the server metrics entity. For scripting/automations via response_variable.",
+      "response": true,
       "fields": {
         "include_schema": {
           "name": "Include input schema",
