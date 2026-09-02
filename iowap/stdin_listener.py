@@ -221,6 +221,9 @@ def _compute_state() -> dict:
         ready = False
 
     per_cap = _read_json(METRICS_PATH) or {}
+    # T-177: relay server probe (written by the daemon's probe thread) —
+    # absent when the daemon predates the probe (stale status file).
+    server = status.get("server") or {}
     return {
         "ready": ready,
         "reason": reason if not ready else "",
@@ -234,6 +237,7 @@ def _compute_state() -> dict:
         "tasks_failed": status.get("tasks_failed", 0),
         "in_flight": len(status.get("in_flight") or {}),
         "per_cap": per_cap,
+        "server": server,
     }
 
 
@@ -277,6 +281,49 @@ def _push_telemetry(payload: dict, token: str) -> bool:
     ok &= r.status_code in (200, 201)
     if r.status_code not in (200, 201):
         LOG.warning("metrics sensor push failed: HTTP %s", r.status_code)
+
+    # -- T-177: relay server entities ----------------------------------------
+
+    srv = payload.get("server") or {}
+    srv_ok = bool(srv.get("ok"))
+    r = httpx.post(
+        "http://supervisor/core/api/states/binary_sensor.iowap_server_ready",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"state": "on" if srv_ok else "off",
+              "attributes": {"friendly_name": "IOWAP Server Ready",
+                             "icon": "mdi:server",
+                             "version": srv.get("version"),
+                             "mode": srv.get("mode"),
+                             "database": srv.get("database"),
+                             "scheduler": srv.get("scheduler"),
+                             "error": srv.get("error") or ""}},
+        timeout=5,
+    )
+    ok &= r.status_code in (200, 201)
+    if r.status_code not in (200, 201):
+        LOG.warning("server ready push failed: HTTP %s", r.status_code)
+
+    r = httpx.post(
+        "http://supervisor/core/api/states/sensor.iowap_server_metrics",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"state": int(srv.get("nodes_online") or 0),
+              "attributes": {"friendly_name": "IOWAP Server Metrics",
+                             "icon": "mdi:server-network",
+                             "unit_of_measurement": "nodes online",
+                             "nodes_total": srv.get("nodes_total"),
+                             "nodes_online": srv.get("nodes_online"),
+                             "queue_depth": srv.get("queue_depth"),
+                             "tasks_completed": srv.get("tasks_completed"),
+                             "tasks_failed": srv.get("tasks_failed"),
+                             "stages_retry_ratio": srv.get("stages_retry_ratio"),
+                             "tasks_created_5m": srv.get("tasks_created_5m"),
+                             "tasks_completed_5m": srv.get("tasks_completed_5m"),
+                             "node_load": srv.get("node_load") or {}}},
+        timeout=5,
+    )
+    ok &= r.status_code in (200, 201)
+    if r.status_code not in (200, 201):
+        LOG.warning("server metrics push failed: HTTP %s", r.status_code)
     return ok
 
 

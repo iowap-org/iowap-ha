@@ -11,11 +11,11 @@ RUN apk add --no-cache curl jq python3
 #    (iowap/vendor/) and must be refreshed when the framework bumps.
 # /opt/venv/bin is prepended to PATH so `node-daemon`, `import nodes` and the
 # framework deps resolve in every run.sh call.
-COPY vendor/iowap_node-2.0.0-py3-none-any.whl /tmp/
+COPY vendor/iowap_node-2.1.0-py3-none-any.whl /tmp/
 RUN python3 -m venv /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir --upgrade pip \
-    && /opt/venv/bin/pip install --no-cache-dir /tmp/iowap_node-2.0.0-py3-none-any.whl \
-    && rm /tmp/iowap_node-2.0.0-py3-none-any.whl
+    && /opt/venv/bin/pip install --no-cache-dir /tmp/iowap_node-2.1.0-py3-none-any.whl \
+    && rm /tmp/iowap_node-2.1.0-py3-none-any.whl
 ENV PATH="/opt/venv/bin:$PATH"
 
 # T-169 reference handler + bootstrap helpers -> /usr/local/bin
