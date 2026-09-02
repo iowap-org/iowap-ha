@@ -51,6 +51,20 @@
           "description": "Lower number = sooner (scheduler semantics)."
         }
       }
+    },
+    "get_capabilities": {
+      "name": "Get cluster capabilities",
+      "description": "Returns the capabilities the IOWAP cluster currently offers (incl. input_schema), read from the server metrics entity. For scripting/automations via response_variable.",
+      "fields": {
+        "include_schema": {
+          "name": "Include input schema",
+          "description": "Include each capability's input_schema in the response."
+        },
+        "available_only": {
+          "name": "Available only",
+          "description": "Only return capabilities that currently have an available node."
+        }
+      }
     }
   }
 }

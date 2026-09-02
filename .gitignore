@@ -1,3 +1,6 @@
 __pycache__/
 *.py[cod]
 .DS_Store
+
+# host-side smoke tests, never shipped (T-172b pattern)
+smoke_*.py

@@ -12,13 +12,21 @@ to the relay directly. This integration provides:
 
 from __future__ import annotations
 
+import json
 import logging
 
 import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import (
+    HomeAssistant,
+    ServiceCall,
+    ServiceResponse,
+    SupportsResponse,
+)
 from homeassistant.helpers.device_registry import async_get
+from homeassistant.helpers.event import async_track_state_change_event
 
+from . import blueprints
 from .const import APP_SLUG, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -47,17 +55,50 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     return True
 
 
+GET_CAPABILITIES_SCHEMA = vol.Schema(
+    {
+        vol.Optional("include_schema", default=True): cv.boolean,
+        vol.Optional("available_only", default=False): cv.boolean,
+    }
+)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry) -> bool:
-    """Set up from a config entry: submit_task service + mirror platforms."""
+    """Set up from a config entry: services + mirror platforms."""
     entry.async_on_unload(entry.add_update_listener(_options_updated))
     await hass.config_entries.async_forward_entry_setups(entry, ["sensor", "binary_sensor"])
-    return await _register_services(hass, entry)
+    registered = await _register_services(hass, entry)
+    # T-180/3: regenerate blueprints whenever the server-metrics entity
+    # (mirror or raw) updates — the capabilities attribute rides on it.
+    entry.async_on_unload(
+        async_track_state_change_event(
+            hass, list(blueprints.ENTITY_CANDIDATES), _on_server_metrics
+        )
+    )
+    # one generation pass at startup (covers HA restarts with stale entity)
+    await _refresh_blueprints(hass)
+    return registered
 
 
 async def async_unload_entry(hass: HomeAssistant, entry) -> bool:
     unload = await hass.config_entries.async_unload_platforms(entry, ["sensor", "binary_sensor"])
     hass.services.async_remove(DOMAIN, "submit_task")
+    hass.services.async_remove(DOMAIN, "get_capabilities")
     return unload
+
+
+async def _on_server_metrics(event) -> None:
+    """Server-metrics entity changed — refresh capability blueprints."""
+    await _refresh_blueprints(event.hass)
+
+
+async def _refresh_blueprints(hass: HomeAssistant) -> None:
+    """Regenerate capability blueprints from the latest entity attribute."""
+    caps = await hass.async_add_executor_job(blueprints._read_entity_caps, hass)
+    if not caps:
+        return  # relay down / attribute empty — keep existing blueprints
+    stats = await hass.async_add_executor_job(blueprints.regenerate, hass, caps)
+    _LOGGER.debug("blueprint refresh: %s", stats)
 
 
 async def _options_updated(hass: HomeAssistant, entry) -> None:
@@ -120,5 +161,33 @@ async def _register_services(hass: HomeAssistant, entry) -> bool:
 
     hass.services.async_register(
         DOMAIN, "submit_task", _handle_submit, schema=SUBMIT_SCHEMA
+    )
+
+    async def _handle_get_capabilities(call: ServiceCall) -> ServiceResponse:
+        """T-180/2: capability list (incl. input_schema) as a service
+        response — usable in automations via `response_variable`."""
+        include_schema = call.data.get("include_schema", True)
+        available_only = call.data.get("available_only", False)
+        caps = await hass.async_add_executor_job(blueprints._read_entity_caps, hass)
+        out: list[dict] = []
+        for cap in caps:
+            if available_only and not cap.get("available", False):
+                continue
+            entry_caps = {
+                "name": cap.get("name"),
+                "available": bool(cap.get("available", False)),
+                "nodes": cap.get("nodes") or [],
+            }
+            if include_schema and cap.get("input_schema"):
+                entry_caps["input_schema"] = cap["input_schema"]
+            out.append(entry_caps)
+        return {"capabilities": out, "count": len(out)}
+
+    hass.services.async_register(
+        DOMAIN,
+        "get_capabilities",
+        _handle_get_capabilities,
+        schema=GET_CAPABILITIES_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
     )
     return True

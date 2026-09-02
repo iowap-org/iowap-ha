@@ -59,6 +59,10 @@ CONFIG_DIR = Path(os.environ.get("IOWAP_CONFIG_DIR", "/data/.relay"))
 DOMAIN_MAP_KEYS = ("light", "scene", "climate", "media_player", "switch",
                    "fan", "humidifier", "vacuum", "lock")
 
+# T-180: cached capability list (incl. input_schema) from the cluster
+# discovery endpoint — written by the telemetry loop, read by _validate.
+CAPS_CACHE = DATA / "caps_cache.json"
+
 
 def _apply_domain_states(states: dict) -> dict:
     """T-173: persist domain states and regenerate the live profile.
@@ -131,6 +135,18 @@ def _load_caps() -> list[dict[str, Any]]:
     return json.loads(out)
 
 
+def _load_caps_cache() -> list[str]:
+    """T-180: capability names from the last successful discovery fetch."""
+    try:
+        caps = json.loads(CAPS_CACHE.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 (missing file, corrupt, …)
+        return []
+    if not isinstance(caps, list):
+        return []
+    return [c["name"] for c in caps
+            if isinstance(c, dict) and isinstance(c.get("name"), str)]
+
+
 def _validate(envelope: dict) -> str | None:
     """Return an error string if the envelope is not acceptable."""
     if envelope.get("kind") not in VALID_KINDS:
@@ -153,6 +169,13 @@ def _validate(envelope: dict) -> str | None:
     prio = envelope.get("priority", 5)
     if not isinstance(prio, int) or isinstance(prio, bool) or not 1 <= prio <= 9:
         return "priority must be int 1..9"
+    # T-180: fail fast on unknown capabilities — but only when we have a
+    # fresh cluster view. Fail-open when the cache is empty (relay offline
+    # at submit time must not silently drop tasks).
+    known = _load_caps_cache()
+    if known and cap not in known:
+        return (f"unknown capability {cap!r} (cluster offers: "
+                f"{', '.join(sorted(known))})")
     return None
 
 
@@ -331,6 +354,7 @@ def _push_telemetry(payload: dict, token: str) -> bool:
                              "capabilities": [
                                  {"name": c.get("name"),
                                   "available": bool(c.get("available")),
+                                  "input_schema": c.get("input_schema"),
                                   "nodes": [n.get("node_name")
                                             for n in (c.get("nodes") or [])]}
                                  for c in (payload.get("caps") or [])
@@ -577,7 +601,14 @@ def _fetch_capabilities(client: Any) -> list[dict] | None:
         LOG.debug("capability discovery failed: %s", exc)
         return None
     caps = data.get("capabilities", data) if isinstance(data, dict) else data
-    return caps if isinstance(caps, list) else None
+    caps = caps if isinstance(caps, list) else None
+    # T-180: persist for offline validation (submit_task capability check)
+    if caps:
+        try:
+            CAPS_CACHE.write_text(json.dumps(caps), encoding="utf-8")
+        except OSError as exc:
+            LOG.debug("caps cache write failed: %s", exc)
+    return caps
 
 
 def drain_loop(client: Any) -> None:
@@ -678,6 +709,10 @@ def main() -> None:
             err = _validate(envelope)
             if err:
                 LOG.warning("dropping invalid envelope: %s", err)
+                # T-180: app_stdin is fire-and-forget — surface rejections
+                # (esp. unknown capability) as an HA notification.
+                if envelope.get("kind") == "submit_task":
+                    _notify(f"submit_task rejected: {err}")
                 continue
             if envelope.get("kind") == "set_domain_states":
                 try:
