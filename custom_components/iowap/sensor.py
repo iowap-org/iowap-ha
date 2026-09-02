@@ -26,9 +26,9 @@ async def async_setup_entry(
 ) -> None:
     async_add_entities(
         [
-            NodeMetricsMirror(hass, entry.entry_id),
-            ServerMetricsMirror(hass, entry.entry_id),
-            TasksMirror(hass, entry.entry_id),
+            NodeMetricsMirror(entry.entry_id),
+            ServerMetricsMirror(entry.entry_id),
+            TasksMirror(entry.entry_id),
         ]
     )
 

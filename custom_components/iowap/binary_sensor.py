@@ -28,8 +28,8 @@ async def async_setup_entry(
 ) -> None:
     async_add_entities(
         [
-            NodeReadyMirror(hass, entry.entry_id),
-            ServerReadyMirror(hass, entry.entry_id),
+            NodeReadyMirror(entry.entry_id),
+            ServerReadyMirror(entry.entry_id),
         ]
     )
 
