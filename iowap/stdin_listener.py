@@ -35,6 +35,16 @@ OUTBOX = DATA / "outbox.jsonl"
 NODE_NAME = "ha-app-node"
 MAX_TRIES = 32                # per-envelope drain budget before final failure
 DRAIN_INTERVAL = 5.0
+# T-172b: telemetry push — worker_status.json (daemon) + metrics.json
+# (ha-exec) are mirrored into HA as entities via the Supervisor proxy.
+STATUS_PATH = Path(
+    os.environ.get("IOWAP_STATUS_PATH", str(Path(os.environ.get("HOME", "/data")) / ".relay" / "worker_status.json"))
+)
+METRICS_PATH = Path(
+    os.environ.get("IOWAP_METRICS_PATH", "/data/handler_state/metrics.json")
+)
+STATUS_MAX_AGE_S = 45  # heartbeat_interval 8s → a healthy daemon never goes stale
+DEFAULT_STATUS_PUSH_INTERVAL = 60
 
 VALID_KINDS = {"submit_task", "set_domain_states"}
 # same env override as ha-exec.py (tests); app default /data (persistent)
@@ -171,6 +181,123 @@ def _notify(text: str) -> None:
         )
     except Exception as exc:  # noqa: BLE001
         LOG.warning("notification failed: %s", exc)
+
+
+# --- T-172b: telemetry push (app → HA core via Supervisor proxy) -----------
+
+def _read_json(path: Path) -> dict | None:
+    try:
+        data = json.loads(path.read_text())
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _compute_state() -> dict:
+    """Merge worker_status.json + metrics.json into the HA payload.
+
+    Returns {} when there is nothing to push yet (daemon not started).
+    """
+    status = _read_json(STATUS_PATH)
+    if status is None:
+        return {}
+
+    ready = False
+    reason = "unknown"
+    try:
+        age = time.time() - STATUS_PATH.stat().st_mtime
+        auth_loop = bool(status.get("auth_loop"))
+        hb_ok = status.get("heartbeat_status") in ("ok", "approved", "claimed")
+        ready = age <= STATUS_MAX_AGE_S and hb_ok and not auth_loop
+        if not ready:
+            if age > STATUS_MAX_AGE_S:
+                reason = f"status stale ({int(age)}s old)"
+            elif auth_loop:
+                reason = "auth loop (token invalid)"
+            else:
+                reason = f"heartbeat {status.get('heartbeat_status')!r}"
+    except OSError:
+        reason = "status unreadable"
+        ready = False
+
+    per_cap = _read_json(METRICS_PATH) or {}
+    return {
+        "ready": ready,
+        "reason": reason if not ready else "",
+        "node_id": status.get("node_id"),
+        "last_heartbeat": status.get("last_heartbeat"),
+        "active_profile": status.get("active_profile"),
+        "auth_loop": status.get("auth_loop", False),
+        "error": status.get("error") or "",
+        "capabilities": len(status.get("capabilities") or []),
+        "tasks_completed": status.get("tasks_completed", 0),
+        "tasks_failed": status.get("tasks_failed", 0),
+        "in_flight": len(status.get("in_flight") or {}),
+        "per_cap": per_cap,
+    }
+
+
+def _push_telemetry(payload: dict, token: str) -> bool:
+    """Create/update the two HA entities. Returns True on full success."""
+    import httpx
+
+    ok = True
+    r = httpx.post(
+        "http://supervisor/core/api/states/binary_sensor.iowap_node_ready",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"state": "on" if payload["ready"] else "off",
+              "attributes": {"friendly_name": "IOWAP Node Ready",
+                             "icon": "mdi:cloud-check",
+                             "reason": payload["reason"],
+                             "node_id": payload["node_id"],
+                             "last_heartbeat": payload["last_heartbeat"],
+                             "active_profile": payload["active_profile"],
+                             "auth_loop": payload["auth_loop"],
+                             "error": payload["error"],
+                             "capabilities": payload["capabilities"]}},
+        timeout=5,
+    )
+    ok &= r.status_code in (200, 201)
+    if r.status_code not in (200, 201):
+        LOG.warning("ready sensor push failed: HTTP %s", r.status_code)
+
+    r = httpx.post(
+        "http://supervisor/core/api/states/sensor.iowap_node_metrics",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"state": payload["capabilities"],
+              "attributes": {"friendly_name": "IOWAP Node Metrics",
+                             "icon": "mdi:chart-box",
+                             "unit_of_measurement": "capabilities",
+                             "tasks_completed": payload["tasks_completed"],
+                             "tasks_failed": payload["tasks_failed"],
+                             "in_flight": payload["in_flight"],
+                             "per_cap": payload["per_cap"]}},
+        timeout=5,
+    )
+    ok &= r.status_code in (200, 201)
+    if r.status_code not in (200, 201):
+        LOG.warning("metrics sensor push failed: HTTP %s", r.status_code)
+    return ok
+
+
+def _telemetry_loop() -> None:
+    interval = DEFAULT_STATUS_PUSH_INTERVAL
+    try:
+        opts = json.loads((DATA / "options.json").read_text())
+        interval = int(opts.get("status_push_interval") or DEFAULT_STATUS_PUSH_INTERVAL)
+    except Exception:
+        pass
+    LOG.info("telemetry push every %ss", interval)
+    while True:
+        try:
+            token = os.environ.get("SUPERVISOR_TOKEN", "")
+            payload = _compute_state()
+            if payload and token:
+                _push_telemetry(payload, token)
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("telemetry push error: %s", exc)
+        for _ in range(max(1, interval)):
+            time.sleep(1)
 
 
 def _rewrite_outbox(remaining: list[dict]) -> None:
@@ -336,6 +463,9 @@ def main() -> None:
             LOG.info("envelope queued: %s", envelope.get("capability"))
 
     threading.Thread(target=read_stdin, name="stdin-reader", daemon=True).start()
+
+    # T-172b: periodic telemetry push into HA (ready + metrics entities)
+    threading.Thread(target=_telemetry_loop, name="telemetry", daemon=True).start()
 
     client = _make_client()
     LOG.info("stdin-listener up (outbox=%s)", OUTBOX)

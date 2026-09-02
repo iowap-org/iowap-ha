@@ -18,10 +18,13 @@ import fnmatch
 import json
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 OPTIONS_PATH = Path("/data/options.json")
+HANDLER_STATE_DIR = Path("/data/handler_state")
+METRICS_PATH = HANDLER_STATE_DIR / "metrics.json"
 
 # The fixed capability matrix. domain+service: NOT payload-controlled.
 # fields:  payload keys allowed through to HA (validated types/regexes)
@@ -139,7 +142,7 @@ def rate_ok(cfg: dict, cap: str) -> tuple[bool, str]:
     # (rate limit is defense-in-depth, must not break handler on odd setups).
     limit = int(cfg.get("rate_limit_per_min", 20))
     try:
-        sdir = Path("/data/handler_state"); sdir.mkdir(parents=True, exist_ok=True)
+        sdir = HANDLER_STATE_DIR; sdir.mkdir(parents=True, exist_ok=True)
         f = sdir / f"{cap.replace('.', '_')}.times"
         now = time.time()
         try:
@@ -154,6 +157,37 @@ def rate_ok(cfg: dict, cap: str) -> tuple[bool, str]:
     except OSError as e:  # unwritable state dir: log-and-allow, don't kill the stage
         print(f"rate-limit state unavailable, allowing without limit: {e}", file=sys.stderr)
     return True, ""
+
+
+def _record_metric(cap: str, outcome: str) -> None:
+    """T-172b: count calls/denied/last_call per capability (best effort).
+
+    The telemetry thread in stdin_listener.py reads this file and pushes it
+    into HA as sensor attributes. Recording must NEVER change the handler's
+    outcome — a metrics problem is a stderr note, not an exit path.
+    """
+    try:
+        HANDLER_STATE_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            metrics = json.loads(METRICS_PATH.read_text())
+            if not isinstance(metrics, dict):
+                metrics = {}
+        except Exception:
+            metrics = {}
+        m = metrics.get(cap) if isinstance(metrics.get(cap), dict) else {}
+        if outcome == "denied":
+            m["denied"] = int(m.get("denied", 0)) + 1
+        else:
+            m["calls"] = int(m.get("calls", 0)) + 1
+            m["last_call"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        m["last_outcome"] = outcome
+        metrics[cap] = m
+        fd, tmp_name = tempfile.mkstemp(dir=str(HANDLER_STATE_DIR), prefix=".metrics.")
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(metrics))
+        os.replace(tmp_name, METRICS_PATH)
+    except OSError as e:
+        print(f"metrics recording unavailable: {e}", file=sys.stderr)
 
 
 def caps_json() -> None:
@@ -251,6 +285,7 @@ def main() -> int:
     entity_id = str(payload.get("entity_id", "")).strip()
     if not entity_id or entity_id.count(".") != 1 or any(c in entity_id for c in " ;/&$`\x00"):
         print(json.dumps({"error": "invalid entity_id"}))
+        _record_metric(cap, "denied")
         return 2
 
     # domain-consistency: entity prefix must match capability's domain
@@ -258,12 +293,14 @@ def main() -> int:
     ent_domain = entity_id.split(".")[0]
     if spec["domain"] != "*" and ent_domain != spec["domain"]:
         print(json.dumps({"error": f"capability {cap} is for domain {spec['domain']}, got {ent_domain} entity"}))
+        _record_metric(cap, "denied")
         return 2
 
     cfg = load_cfg()
     cfg_key = ent_domain + "_entity_scope"
     if not scope_allowed(cfg, cfg_key, entity_id):
         print(json.dumps({"error": f"entity {entity_id} outside configured scope"}))
+        _record_metric(cap, "denied")
         return 3
 
     # T-173: per-domain exposure gate. "off" → domain invisible (denied
@@ -275,22 +312,27 @@ def main() -> int:
     if spec["service"] == "GET_STATE":
         if dstate == "off":
             print(json.dumps({"error": f"domain {ent_domain} is disabled (mode=off) — read denied"}))
+            _record_metric(cap, "denied")
             return 3
     elif dstate != "on":
         print(json.dumps({"error": f"domain {ent_domain} is {dstate} — write denied (readonly/off)"}))
+        _record_metric(cap, "denied")
         return 3
 
     # lock write-gate: read-only unless integration config explicitly upgraded
     if spec["domain"] == "lock" and cfg.get("lock_level", "read") != "write":
         print(json.dumps({"error": "lock is read-only (integration lock.level=read) — use ha.state.get.native for reading"}))
+        _record_metric(cap, "denied")
         return 3
     if spec["service"] == "open":  # latch — never via relay, any level
         print(json.dumps({"error": "lock.open is local-only by design"}))
+        _record_metric(cap, "denied")
         return 3
 
     ok, msg = rate_ok(cfg, cap)
     if not ok:
         print(json.dumps({"error": msg}))
+        _record_metric(cap, "denied")
         return 3
 
     # build minimal HA service payload: whitelist passthrough only
@@ -340,6 +382,7 @@ def main() -> int:
         result = {"ok": True, "entity_id": entity_id, "called": f"{spec['domain']}.{spec['service']}",
                   "state_after": state.get("state", "unknown")}
     print(json.dumps(result))
+    _record_metric(cap, "ok")
     return 0
 
 

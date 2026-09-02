@@ -65,6 +65,21 @@ per-capability rate limit (`rate_limit_per_min`).
 `lock.open` does not exist in the matrix and is rejected by design — opening
 a latch is never available through IOWAP.
 
+## Node status in HA
+
+The app pushes its state into Home Assistant every `status_push_interval`
+seconds (app option, default 60) via the Supervisor proxy — HA core never
+polls the app and no extra network path is opened:
+
+- `binary_sensor.iowap_node_ready` — `on` while the node-daemon heartbeats
+  healthily (status file fresh, heartbeat ok, no auth loop), otherwise `off`
+  with a `reason` attribute. Attributes: `node_id`, `last_heartbeat`,
+  `active_profile`, `capabilities`, `auth_loop`, `error`.
+- `sensor.iowap_node_metrics` — state = number of published capabilities.
+  Attributes: `tasks_completed`, `tasks_failed`, `in_flight` and `per_cap`
+  (per-capability `calls`, `denied`, `last_call`, `last_outcome` counted by
+  the `ha-exec` handler).
+
 ## Repository layout
 
 ```

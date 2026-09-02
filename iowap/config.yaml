@@ -1,5 +1,5 @@
 name: IOWAP Node
-version: "0.1.7"
+version: "0.1.8"
 slug: iowap
 description: >-
   IOWAP node container for Home Assistant OS. Registers as an IOWAP cluster
@@ -26,10 +26,12 @@ options:
   light_entity_scope: "*"
   rate_limit_per_min: 20
   lock_level: read
+  status_push_interval: 60
 schema:
   relay_url: "url?"
   log_level: "list(trace|debug|INFO|WARNING|ERROR)?"
   light_entity_scope: "str?"
   rate_limit_per_min: "int(1,120)?"
   lock_level: "list(read|write)?"
+  status_push_interval: "int(15,3600)?"
 image: ghcr.io/iowap-org/iowap-ha-{arch}
