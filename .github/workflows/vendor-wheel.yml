@@ -100,7 +100,19 @@ jobs:
           git -c user.name="iowap-bot" -c user.email="noreply@iowap-org" \
             commit -m "chore: vendor iowap-node ${VER}, app ${NEWV} (auto)"
           git push
-          echo "Pushed — build-app-images.yml will now build + push the images."
+          echo "Pushed."
+      - name: Trigger app image build
+        # GITHUB_TOKEN pushes do NOT trigger other workflows (anti-recursion),
+        # so dispatch the image build explicitly — same repo, allowed.
+        if: steps.compare.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run build-app-images.yml --ref main
+          sleep 10
+          RUN=$(gh run list -R iowap-org/iowap-ha --workflow=build-app-images.yml \
+            --event=workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId')
+          echo "Triggered Build app images run: https://github.com/iowap-org/iowap-ha/actions/runs/$RUN"
 
       - name: Summary
         if: steps.compare.outputs.changed == 'true'
