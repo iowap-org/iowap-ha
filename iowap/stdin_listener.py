@@ -670,7 +670,11 @@ def main() -> None:
 
     # First boot: register before draining. The daemon run.sh started may
     # heartbeat-401 until the meta file exists — acceptable, it backs off.
-    if not (DATA / ".relay" / "iowap-agent.json").exists():
+    # Dual-read: pre-migration volumes carry the legacy ai-relay-agent.json
+    # name (daemon load_meta() reads both); checking only the new name
+    # would re-register and hit 409 (node_name already taken).
+    if not ((DATA / ".relay" / "iowap-agent.json").exists()
+            or (DATA / ".relay" / "ai-relay-agent.json").exists()):
         LOG.info("no node registration found — registering with relay")
         _register(_load_caps())
 

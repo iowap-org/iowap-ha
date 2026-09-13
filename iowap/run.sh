@@ -85,7 +85,9 @@ cd "$CONFIG_DIR"
 
 supervise_daemon() {
     while true; do
-        if [ -f "$CONFIG_DIR/iowap-agent.json" ]; then
+        # Dual-read: new name preferred; legacy ai-relay-agent.json must
+        # also count, else a pre-migration volume keeps the daemon down.
+        if [ -f "$CONFIG_DIR/iowap-agent.json" ] || [ -f "$CONFIG_DIR/ai-relay-agent.json" ]; then
             if ! node-daemon --foreground; then
                 log "node-daemon exited (rc=$?) — restarting in 5s"
             fi
