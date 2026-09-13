@@ -1,0 +1,107 @@
+name: Vendor wheel
+
+# Keeps iowap/vendor/ in sync with the latest iowap-node wheel release
+# (github.com/iowap-org/iowap-node, tag wheel-vX.Y.Z). Polls on schedule and
+# manually (workflow_dispatch); iowap-node's own release flow has no
+# repository_dispatch — polling is the token-free glue.
+#
+# When a NEW wheel version appears (newer than the vendored one):
+#   1. download the release asset into iowap/vendor/
+#   2. remove the old wheel
+#   3. rewrite the wheel filename in iowap/Dockerfile (COPY + pip install + rm)
+#   4. bump iowap/config.yaml version (last patch segment +1) — the HAOS
+#      supervisor deploys ONLY on a version change, never re-pulls a tag
+#   5. commit + push → the existing build-app-images.yml workflow triggers
+#      (paths filter: iowap/**) and publishes ghcr.io/iowap-ha-{arch}:<new>
+#
+# No-op when the vendored wheel is already the newest release (green no-op,
+# the healthy steady state).
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/30 * * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  vendor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # push with the machine user's own token — otherwise a GITHUB_TOKEN
+          # push would not trigger the build-app-images workflow (paths)
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fetch latest wheel release
+        id: wheel
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REL=$(gh api repos/iowap-org/iowap-node/releases --jq '[.[] | select(.tag_name | startswith("wheel-v"))] | sort_by(.created_at) | reverse | .[0] // empty')
+          if [ -z "$REL" ]; then
+            echo "No wheel-v* release found — nothing to do"
+            exit 0
+          fi
+          TAG=$(echo "$REL" | jq -r .tag_name)
+          VER=${TAG#wheel-v}
+          ASSET="iowap_node-${VER}-py3-none-any.whl"
+          URL=$(echo "$REL" | jq -r --arg a "$ASSET" '.assets[] | select(.name == $a) | .browser_download_url')
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+          echo "asset_url=$URL" >> "$GITHUB_OUTPUT"
+          echo "Latest wheel release: $TAG ($URL)"
+
+      - name: Compare with vendored version
+        id: compare
+        if: steps.wheel.outputs.asset_url != ''
+        run: |
+          CUR=$(ls iowap/vendor/ | grep -oP 'iowap_node-\K[0-9.]+(?=-py3-none-any\.whl)' | head -1)
+          NEW=${{ steps.wheel.outputs.ver }}
+          if [ "$CUR" = "$NEW" ]; then
+            echo "Vendored wheel $CUR is already the newest — no-op"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "New wheel $CUR → $NEW"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Vendor new wheel + bump app version
+        if: steps.compare.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VER=${{ steps.wheel.outputs.ver }}
+          CUR=$(ls iowap/vendor/ | grep -oP 'iowap_node-\K[0-9.]+(?=-py3-none-any\.whl)' | head -1)
+          curl -sL -o "iowap/vendor/iowap_node-${VER}-py3-none-any.whl" "${{ steps.wheel.outputs.asset_url }}"
+          # sanity: the asset must be a real wheel (zip with dist-info)
+          python3 -c "
+          import zipfile, sys
+          z = zipfile.ZipFile('iowap/vendor/iowap_node-${VER}-py3-none-any.whl')
+          metas = [n for n in z.namelist() if n.endswith('.dist-info/METADATA')]
+          assert metas, 'no dist-info in wheel'
+          ver = [l.split()[-1] for l in z.read(metas[0]).decode().splitlines() if l.startswith('Version:')][0]
+          assert ver == '${VER}', f'version mismatch {ver}'
+          print('wheel sanity ok:', ver)
+          "
+          rm "iowap/vendor/iowap_node-${CUR}-py3-none-any.whl"
+          # rewrite Dockerfile wheel references
+          sed -i "s/iowap_node-${CUR}-py3-none-any\.whl/iowap_node-${VER}-py3-none-any.whl/g" iowap/Dockerfile
+          # bump config.yaml version (patch +1) — app version is independent
+          # of the wheel version, read it separately
+          APPV=$(awk -F'"' '/^version:/ {print $2; exit}' iowap/config.yaml)
+          NEWV=$(awk -F'"' -v v="$APPV" 'BEGIN {split(v, p, "."); print p[1]"."p[2]"."p[3]+1}')
+          sed -i "s/^version: \"${APPV}\"/version: \"${NEWV}\"/" iowap/config.yaml
+          git add iowap/vendor iowap/Dockerfile iowap/config.yaml
+          git -c user.name="iowap-bot" -c user.email="noreply@iowap-org" \
+            commit -m "chore: vendor iowap-node ${VER}, app ${NEWV} (auto)"
+          git push
+          echo "Pushed — build-app-images.yml will now build + push the images."
+
+      - name: Summary
+        if: steps.compare.outputs.changed == 'true'
+        run: echo "Vendored iowap-node ${{ steps.wheel.outputs.ver }}" >> "$GITHUB_STEP_SUMMARY"
