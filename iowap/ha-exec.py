@@ -276,6 +276,14 @@ def main() -> int:
         print(json.dumps({"error": f"invalid payload JSON: {e}"}))
         return 2
 
+    # T-005d: strip the Request Envelope {task_id, capability, input} —
+    # handler_runner >=2.3.13 sends strict stdin; older daemons send flat
+    # or mirrored payloads. entity_id etc. then read from the inner payload.
+    if (payload.get("task_id") is not None
+            and payload.get("capability") is not None
+            and isinstance(payload.get("input"), dict)):
+        payload = payload["input"]
+
     cap = os.environ.get("RELAY_CAPABILITY", "")
     spec = CAPS.get(cap)
     if not spec:
