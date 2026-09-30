@@ -108,3 +108,7 @@ iowap-ha/
 - [iowap](https://github.com/iowap-org/iowap) — the story + architecture
 - [iowap-node](https://github.com/iowap-org/iowap-node) — node framework
 - [iowap-server](https://github.com/iowap-org/iowap-server) — relay server
+
+## License
+
+MIT — see [LICENSE](LICENSE).
