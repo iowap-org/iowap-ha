@@ -121,7 +121,7 @@ doorbell below set the option to 15.
 
 1. Automation 1 (trigger: doorbell) → snapshot the doorbell camera, then call
    your AI capability with the image URL:
-   `iowap.submit_task` (capability `agent.ai`, mode queued) with payload:
+   `iowap.submit_task` with payload:
    *"retrieve http://<camera-ip>/snapshot.jpg, evaluate: parcel courier or
    unknown person, answer in one sentence"*.
 2. Automation 2 (trigger: `binary_sensor.iowap_last_task` turning
