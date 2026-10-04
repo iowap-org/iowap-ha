@@ -88,6 +88,65 @@ polls the app and no extra network path is opened:
   (per-capability `calls`, `denied`, `last_call`, `last_outcome` counted by
   the `ha-exec` handler).
 
+## Submissions → results in HA (T-182)
+
+`iowap.submit_task` is fire-and-forget, but every tracked task (one that got
+a `task_id` back from the relay) resurfaces in Home Assistant at its terminal
+state with its result:
+
+- `sensor.iowap_tasks` — attributes `last_task_id`, `last_status`,
+  `last_result` (the handler's result **verbatim** — whatever the capability
+  produced, no interpretation), `result_truncated`, `last_result_task_id`,
+  `last_result_status`, `last_result_updated_iso`.
+- `binary_sensor.iowap_last_task` — dedicated trigger entity for the last
+  finished task. State stays `on` once a result exists; the attributes carry
+  the same result fields. Automations should trigger on this entity (its
+  state/attributes change exactly when a new result arrives) instead of the
+  tasks counter sensor.
+
+Rules of the contract: `completed` results are passed through as
+`stages[0].result`; `failed`/`timed_out` deliver an `{"error": ...}` dict
+(plus the existing notification). Results above `max_result_bytes` (app
+option, default 4096, `0` = unlimited) arrive as a `{"preview": ...}` string
+with `result_truncated: true`. Only the **last** finished task is visible —
+there is no cumulative result history (persistence is the outbox's job).
+A submit that returns no `task_id` (older relay) cannot be tracked and shows
+up only as a notification — that is the honest contract limit.
+
+**Latency:** the result appears with the next status push
+(`status_push_interval`, default 60 s). For interactive use cases like the
+doorbell below set the option to 15.
+
+**Recipe — doorbell verdict in one sentence:**
+
+1. Automation 1 (trigger: doorbell) → snapshot the doorbell camera, then call
+   your AI capability with the image URL:
+   `iowap.submit_task` (capability `agent.ai`, mode queued) with payload:
+   *"retrieve http://<camera-ip>/snapshot.jpg, evaluate: parcel courier or
+   unknown person, answer in one sentence"*.
+2. Automation 2 (trigger: `binary_sensor.iowap_last_task` turning
+   `on`/attributes changing, or `sensor.iowap_tasks` with
+   `attribute: last_result`) → read `last_result` and `tts.speak` /
+   `notify` it. The result shape is the handler's business — automation
+   decides how to interpret it.
+
+```yaml
+# Automation 2 trigger example
+trigger:
+  - platform: state
+    entity_id: binary_sensor.iowap_last_task
+condition:
+  - condition: state
+    entity_id: binary_sensor.iowap_last_task
+    attribute: last_result_status
+    state: completed
+action:
+  - service: tts.speak
+    data:
+      # last_result is the handler's verbatim result dict
+      message: "{{ state_attr('binary_sensor.iowap_last_task', 'last_result')['answer'] }}"
+```
+
 ## Repository layout
 
 ```
