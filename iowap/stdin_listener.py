@@ -633,8 +633,22 @@ def _telemetry_loop() -> None:
 
 
 def _push_tracked(payload: dict, token: str) -> None:
-    """Push sensor.iowap_raw_tasks (T-179a)."""
+    """Push sensor.iowap_raw_tasks (T-179a) + binary_sensor.iowap_raw_last_task
+    (T-182: last completed task's result verbatim, generic contract)."""
     import httpx
+
+    # T-182: result attributes shared by both entities. last_result comes
+    # from the payload verbatim; result_truncated is True only when the
+    # extraction actually truncated (the option-driven preview path).
+    result_attrs = {
+        "last_task_id": payload["last_task_id"],
+        "last_status": payload["last_status"],
+        "last_result": payload.get("last_result"),
+        "result_truncated": bool(payload.get("result_truncated")),
+        "last_result_task_id": payload.get("last_result_task_id"),
+        "last_result_status": payload.get("last_result_status"),
+        "last_result_updated_iso": payload.get("last_result_updated_iso"),
+    }
 
     r = httpx.post(
         "http://supervisor/core/api/states/sensor.iowap_raw_tasks",
@@ -643,14 +657,28 @@ def _push_tracked(payload: dict, token: str) -> None:
               "attributes": {"friendly_name": "IOWAP Tasks",
                              "icon": "mdi:format-list-checks",
                              "unit_of_measurement": "in flight",
-                             "last_task_id": payload["last_task_id"],
-                             "last_status": payload["last_status"],
                              "in_flight": payload["in_flight"],
-                             "statuses": payload["statuses"]}},
+                             "statuses": payload["statuses"],
+                             **result_attrs}},
         timeout=5,
     )
     if r.status_code not in (200, 201):
         LOG.warning("tasks sensor push failed: HTTP %s", r.status_code)
+
+    # T-182: dedicated trigger entity for the last finished task. State = on
+    # whenever a result has been pushed (constant on; automations trigger on
+    # the attribute/state change of this entity, not on the counter sensor).
+    r = httpx.post(
+        "http://supervisor/core/api/states/binary_sensor.iowap_raw_last_task",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"state": "on" if payload.get("last_result") is not None else "off",
+              "attributes": {"friendly_name": "IOWAP Last Task",
+                             "icon": "mdi:bell-ring",
+                             **result_attrs}},
+        timeout=5,
+    )
+    if r.status_code not in (200, 201):
+        LOG.warning("last-task sensor push failed: HTTP %s", r.status_code)
 
 
 def _fetch_capabilities(client: Any) -> list[dict] | None:
