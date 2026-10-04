@@ -25,6 +25,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -423,7 +424,20 @@ def drain_once(client: Any) -> tuple[int, int]:
                 env["_done"] = False
                 remaining.append(env)
                 LOG.info("task accepted: %s → %s", env["capability"], task_id)
-            submitted += 1
+                submitted += 1
+            else:
+                # T-182: a submit without task_id (older server / regression)
+                # can never be polled, so it can never produce a result —
+                # the honest contract limit. Mark terminal, count failed,
+                # and surface it instead of silently dropping the envelope.
+                failed += 1
+                env["_done"] = True
+                env["_error"] = str(resp) if resp else "submit returned no task_id"
+                _notify(
+                    "Submit without task_id — cannot be polled (untracked): "
+                    f"{env.get('capability')} ({env['_error']})"
+                )
+                remaining.append(env)
         except Exception as exc:  # noqa: BLE001
             tries += 1
             env["_tries"] = tries
@@ -443,6 +457,45 @@ def drain_once(client: Any) -> tuple[int, int]:
 
 
 TRACKED_LIMIT = 20  # max envelopes polled per telemetry pass
+
+
+def _option_int(key: str, default: int) -> int:
+    """Read an int app option from /data/options.json (T-182).
+
+    Same failure mode as the status_push_interval handling in
+    _compute_state/_telemetry_loop: any absence or corruption → default.
+    """
+    try:
+        return int(json.loads((DATA / "options.json").read_text()).get(key) or default)
+    except Exception:  # noqa: BLE001 (missing file, corrupt, non-int)
+        return default
+
+
+def _extract_result(task_view: dict) -> tuple[dict | None, bool]:
+    """T-182: extract the terminal task result from a TaskView.
+
+    Returns (result_dict, truncated). Generic contract: whatever the
+    handler produced is passed through verbatim — no capability logic,
+    the shape is the handler's business, automation decides.
+      - completed           → stages[0].result ({} when empty/missing)
+      - failed / timed_out  → {"error": ...} merged over the stage result
+    Result above max_result_bytes (option, default 4096, 0 = unlimited)
+    is JSON-stringified into a "preview" with result_truncated=True.
+    """
+    stages = task_view.get("stages")
+    stage = stages[0] if isinstance(stages, list) and stages and isinstance(stages[0], dict) else {}
+    status = (task_view.get("task") or {}).get("status") or "unknown"
+    result = stage.get("result")
+    if status != "completed":
+        err = {"error": stage.get("error") or f"stage status: {status}"}
+        result = err if not result else {**result, **err}
+    if not isinstance(result, dict):
+        result = {}
+    blob = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+    limit = _option_int("max_result_bytes", 4096)
+    if limit > 0 and len(blob.encode()) > limit:
+        return {"preview": blob[:limit], "result_truncated": True}, True
+    return result, False
 
 
 def _poll_tracked_tasks(client: Any) -> dict | None:
@@ -466,6 +519,10 @@ def _poll_tracked_tasks(client: Any) -> dict | None:
         return None
 
     statuses: dict[str, str] = {}
+    last_result: dict | None = None
+    last_result_trunc = False
+    last_result_id: str | None = None
+    last_result_status: str | None = None
     for env in tracked[:TRACKED_LIMIT]:
         try:
             data = client.get_task(env["_task_id"])
@@ -478,6 +535,13 @@ def _poll_tracked_tasks(client: Any) -> dict | None:
         statuses[env["_task_id"]] = status
         if status in ("completed", "failed", "timed_out"):
             env["_done"] = True
+            # T-182: capture the terminal result verbatim (generic contract).
+            env["_last_result"], trunc = _extract_result(data)
+            if trunc:
+                env["_result_truncated"] = True
+            if not last_result:  # first terminal in this pass wins
+                last_result, last_result_trunc = env["_last_result"], trunc
+                last_result_id, last_result_status = env["_task_id"], status
             if status != "completed":
                 _notify(f"IOWAP task {env['_task_id']} ended: {status}")
             LOG.info("task %s terminal: %s", env["_task_id"], status)
@@ -485,6 +549,24 @@ def _poll_tracked_tasks(client: Any) -> dict | None:
         return None
     in_flight = sum(1 for s in statuses.values() if s not in ("completed", "failed", "timed_out"))
     last_id = tracked[0]["_task_id"]
+    if last_result is None and tracked[0].get("_last_result") is not None:
+        # already-terminal envelopes are skipped by the poll loop — surface
+        # the head envelope's stored result so the entity keeps existing.
+        head = tracked[0]
+        last_result = head["_last_result"]
+        last_result_trunc = bool(head.get("_result_truncated"))
+        last_result_id, last_result_status = last_id, statuses.get(last_id, "unknown")
+        if last_result_status not in ("completed", "failed", "timed_out"):
+            last_result_status = "completed" if "error" not in (last_result or {}) else "failed"
+    if last_result is None:
+        last_result, last_result_trunc = {}, False
+    last_result_payload = {
+        "last_result": last_result,
+        "result_truncated": last_result_trunc,
+        "last_result_task_id": last_result_id,
+        "last_result_status": last_result_status,
+        "last_result_updated_iso": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
     return {
         "state": in_flight,
         "last_task_id": last_id,
@@ -492,6 +574,7 @@ def _poll_tracked_tasks(client: Any) -> dict | None:
         "in_flight": in_flight,
         "statuses": statuses,
         "tracked": tracked,
+        **last_result_payload,
     }
 
 
