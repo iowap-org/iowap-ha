@@ -194,30 +194,25 @@ def _record_metric(cap: str, outcome: str) -> None:
         print(f"metrics recording unavailable: {e}", file=sys.stderr)
 
 
-def _ha_get(path: str) -> tuple[object | None, str | None]:
-    """GET one HA-core registry endpoint via the supervisor proxy.
+def _load_ha_structure(cfg_path: Path | None = None) -> dict | None:
+    """T-183b: the HA registry snapshot the integration pushed (app_stdin).
 
-    Same wire mechanics as the exec path (curl + token from env).
-    Returns (parsed, None) or (None, error) — never raises.
+    None = no snapshot yet (integration not installed/updated) — run_info
+    reports that instead of guessing structure. Shape:
+    {"areas": [...], "entities": [...]}; exposure/scope filtering stays
+    in run_info (the snapshot is raw registry data, not a whitelist).
     """
-    import subprocess
-    ha_url = os.environ.get("IOWAP_HA_URL", "http://supervisor/core/api")
-    cmd = ["curl", "-sS", "-m", "10", "-w", "\\n%{http_code}",
-           "-H", f"Authorization: Bearer {os.environ.get('SUPERVISOR_TOKEN', '')}",
-           f"{ha_url}{path}"]
+    path = cfg_path or Path(
+        os.environ.get("IOWAP_HA_STRUCTURE_PATH", "/data/ha_structure.json")
+    )
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=15).stdout
-    except Exception as e:  # noqa: BLE001 — wire failure is data, not a crash
-        return None, f"{type(e).__name__}: {e}"
-    if out.count("\n") < 1:
-        return None, "no response from HA proxy"
-    body_out, code = out.rsplit("\n", 1)
-    if code.strip() not in ("200", "201"):
-        return None, f"HA returned HTTP {code} ({path})"
-    try:
-        return json.loads(body_out) if body_out.strip() else None, None
-    except json.JSONDecodeError:
-        return None, f"unparseable HA response ({path})"
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict) or not isinstance(raw.get("areas"), list) \
+            or not isinstance(raw.get("entities"), list):
+        return None
+    return raw
 
 
 def run_info(cfg: dict, payload: dict, cap: str) -> int:
@@ -234,13 +229,15 @@ def run_info(cfg: dict, payload: dict, cap: str) -> int:
         _record_metric(cap, "denied")
         return 3
     states = load_domain_states()
-    areas, err = _ha_get("/config/area_registry")
-    entities: object | None = None
-    if err is None:
-        entities, err = _ha_get("/config/entity_registry")
-    if err is not None:
-        print(json.dumps({"error": f"HA info unavailable: {err}"}))
+    snapshot = _load_ha_structure()
+    if snapshot is None:
+        print(json.dumps({"error": (
+            "no HA structure snapshot yet — the iowap integration pushes it "
+            "(kind=set_ha_structure); update the integration in HA"
+        )}))
         return 1
+    areas = snapshot["areas"]
+    entities = snapshot["entities"]
     area_map = {
         a["area_id"]: (a.get("name") or "")
         for a in (areas or []) if isinstance(a, dict) and a.get("area_id")

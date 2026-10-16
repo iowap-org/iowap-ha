@@ -47,10 +47,15 @@ METRICS_PATH = Path(
 STATUS_MAX_AGE_S = 45  # heartbeat_interval 8s → a healthy daemon never goes stale
 DEFAULT_STATUS_PUSH_INTERVAL = 60
 
-VALID_KINDS = {"submit_task", "set_domain_states"}
+VALID_KINDS = {"submit_task", "set_domain_states", "set_ha_structure"}
 # same env override as ha-exec.py (tests); app default /data (persistent)
 DOMAIN_STATES_PATH = Path(
     os.environ.get("IOWAP_DOMAIN_STATES_PATH", "/data/domain_states.json")
+)
+# T-183b: HA registry snapshot (pushed from the integration via app_stdin).
+# Structure only — the exposure/scope enforcement happens in ha-exec.py.
+HA_STRUCTURE_PATH = Path(
+    os.environ.get("IOWAP_HA_STRUCTURE_PATH", "/data/ha_structure.json")
 )
 HA_EXEC = "/usr/local/bin/ha-exec.py"
 GEN_PROFILE = "/usr/local/bin/gen_profile.py"
@@ -63,6 +68,36 @@ DOMAIN_MAP_KEYS = ("light", "scene", "climate", "media_player", "switch",
 # T-180: cached capability list (incl. input_schema) from the cluster
 # discovery endpoint — written by the telemetry loop, read by _validate.
 CAPS_CACHE = DATA / "caps_cache.json"
+
+
+def _apply_ha_structure(structure: dict) -> dict:
+    """T-183b: persist the HA registry snapshot pushed from the integration.
+
+    Local-only (no relay round-trip, like set_domain_states): validated
+    shape — {"areas": [...], "entities": [...]} with dict entries — then
+    atomically stored for ha-exec.py's run_info (ha.info.native).
+    Nothing regenerates: the snapshot feeds discovery, not the profile.
+    """
+    if not isinstance(structure, dict):
+        raise ValueError("structure must be an object")
+    areas = structure.get("areas")
+    entities = structure.get("entities")
+    if not isinstance(areas, list) or not isinstance(entities, list):
+        raise ValueError("structure needs 'areas' and 'entities' lists")
+    if any(not isinstance(a, dict) for a in areas) or any(
+        not isinstance(e, dict) for e in entities
+    ):
+        raise ValueError("areas/entities entries must be objects")
+    clean = {"areas": areas, "entities": entities}
+    HA_STRUCTURE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = HA_STRUCTURE_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(clean), encoding="utf-8")
+    tmp.replace(HA_STRUCTURE_PATH)
+    LOG.info(
+        "ha structure stored: %d areas / %d entities",
+        len(clean["areas"]), len(clean["entities"]),
+    )
+    return clean
 
 
 def _apply_domain_states(states: dict) -> dict:
@@ -161,6 +196,11 @@ def _validate(envelope: dict) -> str | None:
                if d not in DOMAIN_MAP_KEYS or v not in ("on", "readonly", "off")}
         if bad:
             return f"invalid domain states: {bad}"
+        return None
+    # set_ha_structure is handled locally too (persist only, no profile regen)
+    if envelope.get("kind") == "set_ha_structure":
+        if not isinstance(envelope.get("structure"), dict):
+            return "structure must be an object"
         return None
     cap = envelope.get("capability")
     if not isinstance(cap, str) or not cap:
@@ -817,6 +857,14 @@ def main() -> None:
                         f"{d}={v}" for d, v in sorted(applied.items())))
                 except Exception as exc:  # noqa: BLE001
                     LOG.error("set_domain_states failed: %s", exc)
+                continue
+            if envelope.get("kind") == "set_ha_structure":
+                try:
+                    clean = _apply_ha_structure(envelope["structure"])
+                    LOG.info("ha structure applied: %d/%d",
+                             len(clean["areas"]), len(clean["entities"]))
+                except Exception as exc:  # noqa: BLE001
+                    LOG.error("set_ha_structure failed: %s", exc)
                 continue
             _append_outbox(envelope)
             LOG.info("envelope queued: %s", envelope.get("capability"))

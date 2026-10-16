@@ -72,6 +72,11 @@ async def async_setup_entry(hass: HomeAssistant, entry) -> bool:
     )
     # one generation pass at startup (covers HA restarts with stale entity)
     await _refresh_blueprints(hass)
+    # T-183b: initial HA-registry snapshot + debounced re-push on registry
+    # mutations — feeds ha.info.native's discovery via the app snapshot.
+    from . import structure
+
+    structure.track_registry_changes(hass, entry)
     return registered
 
 
