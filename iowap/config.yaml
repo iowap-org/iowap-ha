@@ -1,5 +1,5 @@
 name: IOWAP Node
-version: "0.2.23"
+version: "0.2.24"
 slug: iowap
 description: >-
   IOWAP node container for Home Assistant OS. Registers as an IOWAP cluster

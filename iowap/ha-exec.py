@@ -41,11 +41,12 @@ CAPS = {
     "ha.vacuum.start.native":          {"domain": "vacuum",  "service": "start",         "fields": ("entity_id",)},
     "ha.vacuum.return_to_base.native": {"domain": "vacuum",  "service": "return_to_base", "fields": ("entity_id",)},
     "ha.state.get.native":             {"domain": "*",       "service": "GET_STATE",     "fields": ("entity_id",)},  # read-only, all domains
+    "ha.info.native":                  {"domain": "*",       "service": "INFO",          "fields": ("area",)},        # T-183: discovery — structure of exposed domains only
     "ha.lock.lock.native":             {"domain": "lock",    "service": "lock",          "fields": ("entity_id",)},   # write-gated: lock_level
     "ha.lock.unlock.native":           {"domain": "lock",    "service": "unlock",        "fields": ("entity_id",)},   # write-gated: lock_level; 'open' deliberately absent
 }
 
-WRITE_CAPS = {k for k, v in CAPS.items() if v["service"] not in ("GET_STATE",)}
+WRITE_CAPS = {k for k, v in CAPS.items() if v["service"] not in ("GET_STATE", "INFO")}
 
 # T-172: Per-field schema entries in the daemon-native CapabilityInputSchema
 # format (see iowap-node nodes/common/capability.py). Every key used in a
@@ -65,6 +66,8 @@ FIELD_SPECS: dict[str, dict] = {
                           "description": "Seconds to ramp to the new state."},
     "temperature":       {"type": "number", "ge": 5, "le": 35,
                           "description": "Target temperature in degrees Celsius (climate)."},
+    "area":              {"type": "string", "required": False,
+                          "description": "Discovery filter: area name or area_id, case-insensitive substring."},
 }
 
 # T-172: human-readable descriptions for discovery + docs. English-only
@@ -83,6 +86,7 @@ CAP_DOCS: dict[str, str] = {
     "ha.vacuum.start.native":            "Start the vacuum's cleaning run.",
     "ha.vacuum.return_to_base.native":   "Send the vacuum back to its dock.",
     "ha.state.get.native":               "Read the current state and attributes of one entity (read-only, all domains).",
+    "ha.info.native":                    "Discovery: list the areas and entities this node may see — filtered by domain exposure (on/readonly) and the per-domain entity scope. No operational state values; call ha.state.get.native per entity.",
     "ha.lock.lock.native":               "Lock a lock entity. Only active when the integration option lock.level=write; lock.open is never available via IOWAP by design.",
     "ha.lock.unlock.native":             "Unlock a lock entity. Only active when the integration option lock.level=write; lock.open is never available via IOWAP by design.",
 }
@@ -190,6 +194,94 @@ def _record_metric(cap: str, outcome: str) -> None:
         print(f"metrics recording unavailable: {e}", file=sys.stderr)
 
 
+def _ha_get(path: str) -> tuple[object | None, str | None]:
+    """GET one HA-core registry endpoint via the supervisor proxy.
+
+    Same wire mechanics as the exec path (curl + token from env).
+    Returns (parsed, None) or (None, error) — never raises.
+    """
+    import subprocess
+    ha_url = os.environ.get("IOWAP_HA_URL", "http://supervisor/core/api")
+    cmd = ["curl", "-sS", "-m", "10", "-w", "\\n%{http_code}",
+           "-H", f"Authorization: Bearer {os.environ.get('SUPERVISOR_TOKEN', '')}",
+           f"{ha_url}{path}"]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=15).stdout
+    except Exception as e:  # noqa: BLE001 — wire failure is data, not a crash
+        return None, f"{type(e).__name__}: {e}"
+    if out.count("\n") < 1:
+        return None, "no response from HA proxy"
+    body_out, code = out.rsplit("\n", 1)
+    if code.strip() not in ("200", "201"):
+        return None, f"HA returned HTTP {code} ({path})"
+    try:
+        return json.loads(body_out) if body_out.strip() else None, None
+    except json.JSONDecodeError:
+        return None, f"unparseable HA response ({path})"
+
+
+def run_info(cfg: dict, payload: dict, cap: str) -> int:
+    """T-183: exposed areas/entities — the same filters the exec path enforces.
+
+    Domains with mode ``off`` vanish entirely; every listed entity is one
+    the exec path could address (per-domain entity-scope patterns).
+    Disabled/hidden entities are skipped. Registry structure only — no
+    operational state values (those go through ha.state.get.native).
+    """
+    ok, msg = rate_ok(cfg, cap)
+    if not ok:
+        print(json.dumps({"error": msg}))
+        _record_metric(cap, "denied")
+        return 3
+    states = load_domain_states()
+    areas, err = _ha_get("/config/area_registry")
+    entities: object | None = None
+    if err is None:
+        entities, err = _ha_get("/config/entity_registry")
+    if err is not None:
+        print(json.dumps({"error": f"HA info unavailable: {err}"}))
+        return 1
+    area_map = {
+        a["area_id"]: (a.get("name") or "")
+        for a in (areas or []) if isinstance(a, dict) and a.get("area_id")
+    }
+    area_filter = str(payload.get("area", "") or "").strip().lower()
+    rows: list[dict] = []
+    domains: dict[str, int] = {}
+    for e in entities or []:
+        if not isinstance(e, dict):
+            continue
+        entity_id = e.get("entity_id", "")
+        if "." not in entity_id:
+            continue
+        dom = entity_id.split(".", 1)[0]
+        if states.get(dom) in (None, "off"):
+            continue
+        if e.get("disabled_by") or e.get("hidden_by"):
+            continue
+        if not scope_allowed(cfg, f"{dom}_entity_scope", entity_id):
+            continue
+        area_id = e.get("area_id")
+        area_label = area_map.get(area_id, "")
+        if area_filter and area_filter not in area_label.lower() \
+                and area_filter not in str(area_id or "").lower():
+            continue
+        rows.append({"entity_id": entity_id,
+                     "name": e.get("name") or e.get("original_name"),
+                     "area_id": area_id, "domain": dom})
+        domains[dom] = domains.get(dom, 0) + 1
+    print(json.dumps({
+        "ok": True,
+        "exposure": states,
+        "areas": [{"area_id": a["area_id"], "name": area_map.get(a["area_id"])}
+                  for a in (areas or []) if isinstance(a, dict) and a.get("area_id")],
+        "domains": domains,
+        "entities": rows,
+    }))
+    _record_metric(cap, "ok")
+    return 0
+
+
 def caps_json() -> None:
     """Emit the CAPS table as JSON for the run.sh profile bootstrap.
 
@@ -227,10 +319,9 @@ def caps_json() -> None:
     def published(name: str, spec: dict) -> bool:
         if states is None:
             return True
-        mode = states.get(spec["domain"], "readonly")
-        if spec["service"] == "GET_STATE":
-            return mode != "off"
-        return mode == "on"
+        if spec["service"] in ("GET_STATE", "INFO"):
+            return states.get(spec["domain"], "readonly") != "off"
+        return states.get(spec["domain"], "readonly") == "on"
 
     caps = [
         {
@@ -289,6 +380,11 @@ def main() -> int:
     if not spec:
         print(json.dumps({"error": f"unknown capability {cap!r}"}))
         return 2
+
+    # T-183: INFO is discovery — no entity_id is involved, the registry
+    # fetch + exposure/scope filtering happens inside run_info.
+    if spec["service"] == "INFO":
+        return run_info(load_cfg(), payload, cap)
 
     entity_id = str(payload.get("entity_id", "")).strip()
     if not entity_id or entity_id.count(".") != 1 or any(c in entity_id for c in " ;/&$`\x00"):
