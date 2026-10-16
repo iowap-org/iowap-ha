@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from homeassistant.helpers import area_registry as ar
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.area_registry import EVENT_AREA_REGISTRY_UPDATED
 from homeassistant.helpers.entity_registry import EVENT_ENTITY_REGISTRY_UPDATED
@@ -31,14 +32,24 @@ _DEBOUNCE_SECONDS = 5.0
 
 
 def collect_structure(hass: Any) -> dict:
-    """Serialize area + entity registries (registry facts only, no states)."""
+    """Serialize area + entity registries (registry facts only, no states).
+
+    Area resolution: the entity registry carries only OVERRIDES — the
+    real assignment mostly lives at the DEVICE. Resolve:
+    entity.area_id  → falls back to device.area_id (T-183c).
+    """
     ent_reg = er.async_get(hass)
     area_reg = ar.async_get(hass)
+    dev_reg = dr.async_get(hass)
     areas = [{"area_id": a.id, "name": a.name} for a in area_reg.async_list_areas()]
+    device_area: dict[str, Any] = {
+        d.id: d.area_id for d in dev_reg.devices.values()
+    }
     entities = [
         {
             "entity_id": e.entity_id,
-            "area_id": e.area_id,
+            "area_id": e.area_id or device_area.get(e.device_id),
+            "area_id_override": e.area_id,
             "name": e.name,
             "original_name": e.original_name,
             "disabled_by": e.disabled_by,
