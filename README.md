@@ -162,6 +162,33 @@ iowap-ha/
     └── services.yaml            # iowap.submit_task
 ```
 
+## Smoke scripts (T-265)
+
+The seven `smoke_*.py` scripts at the repo root exercise the app handler,
+stdin listener, blueprint generator and integration mirrors against stubbed
+`homeassistant` trees — **no relay, no HA supervisor, no live
+infrastructure**. All seven pass with outbound networking disabled, so they
+all run in CI: the **Smoke tests** workflow
+([`.github/workflows/smoke.yml`](.github/workflows/smoke.yml), manual
+`workflow_dispatch`, one job per script).
+
+| Script | Runs in CI | Scope |
+|---|---|---|
+| `smoke_t178.py` | ✅ | stdin listener: raw-namespace push, outbox drain/tracking, capability validation |
+| `smoke_int_t178.py` | ✅ | integration platforms: constructor arity, registration, device_info, stale logic |
+| `smoke_t180.py` | ✅ | blueprint generator: YAML validity, selector mapping, manifest refresh, services wiring |
+| `smoke_t181.py` | ✅ | script blueprints + triggers/conditions inputs, both domains |
+| `smoke_t182.py` | ✅ | task-result back-channel: last_result, truncation, `binary_sensor.iowap_last_task` |
+| `smoke_t183.py` | ✅ | `ha.info.native`: snapshot-backed discovery, exposure gate, area filter, rate limit |
+| `smoke_t183b.py` | ✅ | structure collector (registry fakes) + stdin-listener apply of the snapshot |
+
+Nothing runs manually only: there is **no live-infra smoke** — the scripts
+that would need the relay or a running HA are not part of this set.
+End-to-end validation (full submit → relay → result roundtrip against the
+live relay + HA supervisor) stays on a live node and is deliberately not
+automated here. Run locally with `python3 smoke_<ticket>.py`; only stdlib
+plus `httpx` and `pyyaml` are required.
+
 ## Links
 
 - [iowap](https://github.com/iowap-org/iowap) — the story + architecture
