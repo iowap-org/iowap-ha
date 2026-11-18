@@ -59,7 +59,7 @@ HA_STRUCTURE_PATH = Path(
 )
 HA_EXEC = "/usr/local/bin/ha-exec.py"
 GEN_PROFILE = "/usr/local/bin/gen_profile.py"
-# $CONFIG_DIR — run.sh starts node-daemon with WorkingDirectory=$CONFIG_DIR,
+# $CONFIG_DIR — run.sh starts iowap-daemon with WorkingDirectory=$CONFIG_DIR,
 # so the daemon's ACTIVE_PATH (default ~/.relay/node.yaml) lives here.
 CONFIG_DIR = Path(os.environ.get("IOWAP_CONFIG_DIR", "/data/.relay"))
 DOMAIN_MAP_KEYS = ("light", "scene", "climate", "media_player", "switch",
@@ -106,7 +106,7 @@ def _apply_domain_states(states: dict) -> dict:
     1. ha-exec.py --write-domain-states  (atomic persist, whitelist-clean)
     2. ha-exec.py --caps-json --filter-states | gen_profile.py > node.yaml
        (same pipeline as run.sh bootstrap, minus caps not allowed by states)
-    3. SIGHUP the node-daemon → invalidates its profile cache → next
+    3. SIGHUP the iowap-daemon → invalidates its profile cache → next
        heartbeat republishes the reduced capability list to the relay.
 
     Returns the applied (whitelist-cleaned) states for echo-back.
@@ -140,7 +140,7 @@ def _apply_domain_states(states: dict) -> dict:
     pids: list[int] = []
     try:
         out = subprocess.run(
-            ["pgrep", "-f", "node-daemon|node_cli.*daemon"], capture_output=True,
+            ["pgrep", "-f", "iowap-daemon|node-daemon|node_cli.*daemon"], capture_output=True,
             text=True, timeout=5,
         ).stdout.split()
         pids = [int(p) for p in out if p.isdigit() and int(p) != os.getpid()]
@@ -149,7 +149,7 @@ def _apply_domain_states(states: dict) -> dict:
     for pid in pids:
         try:
             os.kill(pid, _signal.SIGHUP)
-            LOG.info("SIGHUP → node-daemon (pid %s): profile reload", pid)
+            LOG.info("SIGHUP → iowap-daemon (pid %s): profile reload", pid)
         except OSError as exc:
             LOG.warning("SIGHUP to daemon %s failed (heartbeat still republishes): %s", pid, exc)
     return applied
@@ -656,7 +656,7 @@ def _telemetry_loop() -> None:
             payload = _compute_state()
             if payload and token:
                 # T-179b: cluster capabilities (same discovery endpoint as
-                # node-cli) ride along as a server-metrics attribute.
+                # iowap-cli) ride along as a server-metrics attribute.
                 if client is not None:
                     payload["caps"] = _fetch_capabilities(client)
                 _push_telemetry(payload, token)
@@ -723,7 +723,7 @@ def _push_tracked(payload: dict, token: str) -> None:
 
 def _fetch_capabilities(client: Any) -> list[dict] | None:
     """T-179b: cluster-wide capabilities via the same discovery endpoint
-    node-cli uses (capabilities server). None on any error — fail-safe."""
+    iowap-cli uses (capabilities server). None on any error — fail-safe."""
     try:
         r = client._get_with_retry("/relay/v2/discovery/capabilities")
         r.raise_for_status()
@@ -802,7 +802,7 @@ def _register(capabilities: list[dict]) -> None:
 def _sigterm(_signum: int, _frame: Any) -> None:
     """Supervisor stops PID 1 (this process) on app stop — exit promptly.
 
-    The node-daemon runs as this container's background child; container
+    The iowap-daemon runs as this container's background child; container
     teardown kills it. The outbox is crash-safe (fsync per line), so a
     mid-drain kill loses nothing.
     """

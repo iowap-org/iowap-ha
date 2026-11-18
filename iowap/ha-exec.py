@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """T-169 reference handler: executes ONE HA capability per invocation.
 
-Lives in the IOWAP HA app container. The node-daemon (iowap-node) runs this
+Lives in the IOWAP HA app container. The iowap-daemon (iowap-node) runs this
 via handler_runner: payload JSON on stdin, result JSON on stdout, exit 0 ok.
 Which HA call this run performs is looked up from RELAY_CAPABILITY via the
 CAPS table below — the table is the security boundary: domain+service are

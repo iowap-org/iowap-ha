@@ -9,7 +9,7 @@ the `iowap/` app folder, HACS reads `custom_components/iowap/`.]
 
 | Direction | What | How |
 |-----------|------|-----|
-| Cluster → HA | Tasks from IOWAP nodes drive approved home capabilities (lights, climate, scenes, state reads; locks read-only by default) | `iowap/` app: node-daemon + `ha-exec` handler with a fixed capability matrix |
+| Cluster → HA | Tasks from IOWAP nodes drive approved home capabilities (lights, climate, scenes, state reads; locks read-only by default) | `iowap/` app: iowap-daemon + `ha-exec` handler with a fixed capability matrix |
 | HA → Cluster | Automations submit tasks into the cluster (e.g. smoke detected → `agent.ai`) | `iowap.submit_task` service → `hassio.app_stdin` → app outbox |
 | HA visibility | Relay health/readiness as HA sensors | app-side (v2) |
 
@@ -79,7 +79,7 @@ The app pushes its state into Home Assistant every `status_push_interval`
 seconds (app option, default 60) via the Supervisor proxy — HA core never
 polls the app and no extra network path is opened:
 
-- `binary_sensor.iowap_node_ready` — `on` while the node-daemon heartbeats
+- `binary_sensor.iowap_node_ready` — `on` while the iowap-daemon heartbeats
   healthily (status file fresh, heartbeat ok, no auth loop), otherwise `off`
   with a `reason` attribute. Attributes: `node_id`, `last_heartbeat`,
   `active_profile`, `capabilities`, `auth_loop`, `error`.

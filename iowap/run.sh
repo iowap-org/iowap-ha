@@ -3,7 +3,7 @@
 # 1. Waits for the HA core API (Supervisor proxy) to come up.
 # 2. Bootstraps relay_config.json + registration (via registration secret from
 #    the app options / data dir) if no token exists yet.
-# 3. Starts the node-daemon (heartbeat/claim loops, handler_runner) AND the
+# 3. Starts the iowap-daemon (heartbeat/claim loops, handler_runner) AND the
 #    stdin-listener (hassio.app_stdin consumer → /data/outbox.jsonl → relay).
 #    ha-exec.py is registered as the handler for the ha.* capabilities.
 
@@ -72,7 +72,7 @@ python3 /usr/local/bin/ha-exec.py --caps-json --filter-states \
     | python3 /usr/local/bin/gen_profile.py > "$CONFIG_DIR/node.yaml"
 log "node profile generated ($(grep -c 'name:' "$CONFIG_DIR/node.yaml") capabilities)"
 
-# 7. node-daemon (supervised bg) + stdin-listener (fg, PID 1 via exec).
+# 7. iowap-daemon (supervised bg) + stdin-listener (fg, PID 1 via exec).
 #    hassio.app_stdin targets THIS container's stdin, so the listener must be
 #    the process holding it. The listener registers the node on first boot
 #    (pending until admin approval); the daemon only runs once that meta file
@@ -80,7 +80,7 @@ log "node profile generated ($(grep -c 'name:' "$CONFIG_DIR/node.yaml") capabili
 #    daemon), so we supervise: wait for meta, restart on crash. Supervisor
 #    restarts the whole app if the listener exits; on stop, SIGTERM ends the
 #    listener and container teardown reaps the supervisor loop.
-log "starting node-daemon supervisor (WorkingDir=$CONFIG_DIR)"
+log "starting iowap-daemon supervisor (WorkingDir=$CONFIG_DIR)"
 cd "$CONFIG_DIR"
 
 supervise_daemon() {
@@ -88,8 +88,8 @@ supervise_daemon() {
         # Dual-read: new name preferred; legacy ai-relay-agent.json must
         # also count, else a pre-migration volume keeps the daemon down.
         if [ -f "$CONFIG_DIR/iowap-agent.json" ] || [ -f "$CONFIG_DIR/ai-relay-agent.json" ]; then
-            if ! node-daemon --foreground; then
-                log "node-daemon exited (rc=$?) — restarting in 5s"
+            if ! iowap-daemon --foreground; then
+                log "iowap-daemon exited (rc=$?) — restarting in 5s"
             fi
         fi
         sleep 5
@@ -100,7 +100,7 @@ SUPERVISOR_PID=$!
 
 shutdown() {
     kill "$SUPERVISOR_PID" 2>/dev/null || true
-    pkill -f '^node-daemon' 2>/dev/null || true
+    pkill -f 'iowap-daemon' 2>/dev/null || true
 }
 trap shutdown TERM INT
 
